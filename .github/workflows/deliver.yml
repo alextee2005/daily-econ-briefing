@@ -1,0 +1,98 @@
+name: Deliver briefing to Telegram
+
+# Fires whenever a new PDF lands in editions/.
+# Also runnable by hand from the Actions tab (optionally naming a specific file).
+
+on:
+  push:
+    paths:
+      - 'editions/**.pdf'
+  workflow_dispatch:
+    inputs:
+      file:
+        description: 'Path to a specific PDF to send (leave blank for the newest)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-delivery
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Select the PDF to send
+        id: pick
+        run: |
+          set -euo pipefail
+          MANUAL="${{ github.event.inputs.file }}"
+
+          if [ -n "$MANUAL" ]; then
+            PDF="$MANUAL"
+          else
+            # Prefer a PDF added or modified by this push.
+            PDF="$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'editions/*.pdf' 2>/dev/null | tail -n 1 || true)"
+          fi
+
+          # Fall back to the newest file by name (filenames are ISO-dated, so sort works).
+          if [ -z "${PDF:-}" ]; then
+            PDF="$(ls -1 editions/*.pdf 2>/dev/null | sort | tail -n 1 || true)"
+          fi
+
+          if [ -z "${PDF:-}" ] || [ ! -f "$PDF" ]; then
+            echo "::error::No PDF found to send (looked for editions/*.pdf)."
+            exit 1
+          fi
+
+          SIZE_MB=$(( $(stat -c%s "$PDF") / 1048576 ))
+          if [ "$SIZE_MB" -ge 50 ]; then
+            echo "::error::$PDF is ${SIZE_MB}MB; Telegram's sendDocument limit is 50MB."
+            exit 1
+          fi
+
+          echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
+          echo "Selected: $PDF (${SIZE_MB}MB)"
+
+      - name: Send to Telegram
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          PDF:   ${{ steps.pick.outputs.pdf }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TOKEN:-}" ] || [ -z "${CHAT:-}" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID secret is not set."
+            exit 1
+          fi
+
+          # Turn Daily_Economic_Briefing_2026-08-13.pdf into a readable caption.
+          DATE="$(basename "$PDF" .pdf | sed 's/.*_//')"
+          CAPTION="Daily Economic Briefing — ${DATE}"
+
+          HTTP=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+            -o /tmp/tg.json -w '%{http_code}' \
+            -F "chat_id=${CHAT}" \
+            -F "caption=${CAPTION}" \
+            -F "document=@${PDF};type=application/pdf" \
+            "https://api.telegram.org/bot${TOKEN}/sendDocument")
+
+          echo "HTTP ${HTTP}"
+          # Never print the raw body unfiltered — it can echo back chat metadata.
+          python3 -c "import json,sys; d=json.load(open('/tmp/tg.json')); print('ok:', d.get('ok'), '| error:', d.get('description','none'))"
+
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Telegram returned HTTP ${HTTP}. Check the bot token, the chat ID, and that you have sent /start to the bot."
+            exit 1
+          fi
+
+          echo "Delivered ${PDF} to Telegram."
