@@ -12,14 +12,23 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_report import OK, MISSING, PARTIAL, build_stages, load_log  # noqa: E402
+from run_report import (  # noqa: E402
+    OK, MISSING, PARTIAL, build_stages, cost_line, denial_section, error_section, load_log,
+)
 
 
-def log_file(tmp: Path, calls, result=None):
+def log_file(tmp: Path, calls, result=None, results_for=None):
+    """results_for: {tool_name: (content, is_error)} replies to emit per call."""
     entries = [{"type": "system", "subtype": "init"}]
-    for name, payload in calls:
+    for i, (name, payload) in enumerate(calls):
+        tid = f"tu_{i}"
         entries.append({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": name, "input": payload}]}})
+            {"type": "tool_use", "id": tid, "name": name, "input": payload}]}})
+        if results_for and name in results_for:
+            content, is_err = results_for[name]
+            entries.append({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": tid,
+                 "content": content, "is_error": is_err}]}})
     entries.append({"type": "result", **(result or {"subtype": "success", "is_error": False})})
     p = tmp / "log.json"
     p.write_text(json.dumps(entries))
@@ -39,8 +48,8 @@ def stages_for(tmp: Path, calls, made):
         pdf.write_bytes(b"%PDF-1.4" + b"0" * 50_000)
     if "spec" in made:
         spec.write_text("# spec" + "x" * 9000)
-    calls_parsed, _, _ = load_log(log_file(tmp, calls))
-    return {n: s for n, s, _ in build_stages(calls_parsed, pdf, html, spec, build)}
+    run = load_log(log_file(tmp, calls))
+    return {n: s for n, s, _ in build_stages(run.calls, pdf, html, spec, build)}
 
 
 failures = 0
@@ -92,6 +101,49 @@ with tempfile.TemporaryDirectory() as td:
 with tempfile.TemporaryDirectory() as td:
     s = stages_for(Path(td), [], made=[])
     expect("auth failure: nothing reached", set(s.values()), {MISSING})
+
+# --- denials must name the tool, not just count it ----------------------------
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    run = load_log(log_file(
+        tmp,
+        [("Read", "spec"), ("NotebookEdit", "x"), ("Bash", "ls")],
+        result={"subtype": "success", "is_error": False, "permission_denials_count": 1},
+        results_for={"NotebookEdit": ("Claude requested permissions to use "
+                                      "NotebookEdit, but you haven't granted it.", True)},
+    ))
+expect("denial captured", [t for t, _ in run.denials], ["NotebookEdit"])
+section = "\n".join(denial_section(run, "Read,Bash,Write"))
+expect("denied tool is named in the report", "`NotebookEdit`" in section, True)
+expect("report flags it as absent from allowedTools", "**no**" in section, True)
+
+# A denial of a tool that IS declared is a different problem, and must read so.
+section2 = "\n".join(denial_section(run, "Read,Bash,NotebookEdit"))
+expect("declared-but-denied reads differently", "| yes |" in section2, True)
+
+# Count with no message: say the tool is unidentifiable rather than stay silent.
+with tempfile.TemporaryDirectory() as td:
+    run2 = load_log(log_file(Path(td), [("Read", "x")],
+                             result={"permission_denials_count": 2}))
+expect("unexplained denial is still reported",
+       "could not be identified" in "\n".join(denial_section(run2, "")), True)
+
+# --- non-permission tool errors are reported separately -----------------------
+with tempfile.TemporaryDirectory() as td:
+    run3 = load_log(log_file(
+        Path(td), [("WebFetch", "https://cboe.example")],
+        results_for={"WebFetch": ("HTTP 403 from upstream", True)}))
+expect("tool error captured, not misread as a denial",
+       (len(run3.denials), [t for t, _ in run3.errors]), (0, ["WebFetch"]))
+expect("tool error appears in its own section",
+       "`WebFetch`" in "\n".join(error_section(run3)), True)
+
+# --- cost line ----------------------------------------------------------------
+line = cost_line({"total_cost_usd": 6.0965125, "duration_ms": 1074067, "num_turns": 33})
+expect("cost line shows dollars", "$6.10" in line, True)
+expect("cost line shows minutes and turns", ("17.9 min" in line and "33 turns" in line), True)
+expect("cost line is honest about tokens", "no token counts" in line, True)
+expect("cost line survives an empty result", "no result entry" in cost_line({}), True)
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

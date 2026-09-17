@@ -44,6 +44,9 @@ concurrency:
 
 env:
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+  # Defined once so the run report can say whether a denied tool was even
+  # declared, rather than comparing against a copy that drifts.
+  ALLOWED_TOOLS: "Skill,SlashCommand,Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Task,TodoWrite"
 
 jobs:
   brief:
@@ -103,7 +106,7 @@ jobs:
           allowed_bots: "github-actions[bot],claude[bot]"
           claude_args: |
             --model ${{ inputs.model || 'claude-sonnet-5' }}
-            --allowedTools "Skill,SlashCommand,Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Task,TodoWrite"
+            --allowedTools "${{ env.ALLOWED_TOOLS }}"
           prompt: |
             /daily-economic-briefing
 
@@ -172,6 +175,7 @@ jobs:
             --pdf "${{ steps.gate.outputs.pdf_path }}" \
             --html build/briefing.html \
             --new-spec "${{ steps.gate.outputs.next_spec_path }}" \
+            --allowed-tools "$ALLOWED_TOOLS" \
             --require-pdf
 
       - name: Verify the output

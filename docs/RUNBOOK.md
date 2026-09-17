@@ -85,6 +85,26 @@ Claude invoked the thing but no output appeared — it failed while running.
 `MISSING` means the stage was never reached. Below the table sit Claude's own
 result fields, its closing messages, and the tool-call sequence.
 
+Below the stage table the summary also carries:
+
+- **Cost** — dollars, minutes and turns. Token counts are *not* available: the
+  SDK's `modelUsage` reports context limits, not consumption, and the action
+  hides the per-message output that would carry them. The line says so rather
+  than looking like an omission. For real token metrics you would need
+  `CLAUDE_CODE_ENABLE_TELEMETRY` and an OTEL endpoint to send them to.
+- **Permission denials**, named. `permission_denials_count: 1` on its own says
+  something was blocked without saying what. The table names the tool, how many
+  times, and whether it was in `--allowedTools` — which separates the two cases:
+  a tool absent from the list is a workflow fix, a tool present and still denied
+  is a settings problem. When the count is non-zero but no denial message
+  survives in the log, the report says the tool could not be identified rather
+  than staying silent.
+- **Tool errors** that are not permission-related — a repeatedly failing
+  `WebFetch` against a known-awkward source, for instance.
+
+`ALLOWED_TOOLS` is defined once at job level and passed both to the action and
+to the reporter, so the comparison is against the list actually in force.
+
 The verification checks append to the same summary, so one page covers the
 whole run and a failure rarely needs a second one. Every run also uploads its
 `build/` directory, the PDF and the new spec as an artifact, successes
