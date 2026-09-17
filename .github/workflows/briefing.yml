@@ -203,10 +203,20 @@ jobs:
 
       - name: Commit and push
         if: steps.gate.outputs.should_run == 'true' && !inputs.dry_run && steps.verify.outputs.code != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # claude-code-action strips actions/checkout's credentials, rewrites
+          # origin to carry its own GitHub App token, and then revokes that
+          # token when it finishes — so the URL it leaves behind authenticates
+          # as nothing and the push dies with "Invalid username or token".
+          # Point origin back at a credential that is still alive.
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git add -- "${{ steps.gate.outputs.pdf_path }}"
 
@@ -220,6 +230,9 @@ jobs:
           fi
 
           git commit -m "$MSG" -m "Covers ${{ steps.gate.outputs.sessions_covered }}, cutoff ${{ steps.gate.outputs.cutoff_et }}."
+
+          # A run takes ~18 minutes, so main may have moved underneath it.
+          git pull --rebase --autostash origin main
           git push origin HEAD:main
 
       - name: Deliver to Telegram
