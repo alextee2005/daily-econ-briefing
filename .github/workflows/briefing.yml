@@ -104,8 +104,24 @@ jobs:
           prompt: |
             /daily-economic-briefing
 
-            Scheduled, non-interactive run. There is nobody to ask: if a figure
-            cannot be verified, it goes in Annex A rather than being estimated.
+            SINGLE-SHOT HEADLESS RUN — read this before anything else.
+
+            This process exits the moment your turn ends. Nothing survives it:
+            background subagents are killed mid-flight, scheduled wakeups never
+            fire, and nobody re-invokes you. A previous run ended its turn
+            saying "the four research passes are running in the background,
+            I'll wait for them to complete" — they were killed, and the run
+            produced nothing. So:
+
+              - Run the four research passes with run_in_background: false, so
+                they finish inside this turn. Issue them in a single message and
+                they still run concurrently — you get the parallelism either way.
+              - Never end your turn to wait for anything, and never schedule a
+                wakeup or defer work to a later turn.
+              - Both outputs below must exist on disk before you finish.
+
+            There is also nobody to ask: if a figure cannot be verified, it goes
+            in Annex A rather than being estimated.
 
             Read the standing spec first and treat it as your instructions:
               ${{ steps.gate.outputs.spec_path }}
