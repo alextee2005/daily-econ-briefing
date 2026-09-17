@@ -15,6 +15,7 @@ half-written file, or one whose edition log the next run cannot pick up.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -34,10 +35,27 @@ MIN_SPEC_RATIO = 0.60
 ok, problems = [], []
 
 
+summary_rows = []
+
+
 def check(label: str, passed: bool, detail: str = "") -> bool:
     (ok if passed else problems).append(f"{label}{f' — {detail}' if detail else ''}")
     print(f"  {'PASS' if passed else 'FAIL'}  {label}{f' — {detail}' if detail else ''}")
+    summary_rows.append((label, passed, detail))
     return passed
+
+
+def write_summary(verdict: str) -> None:
+    """Append the checks to the job summary, beside the stage table."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["## Edition verification", "", f"**{verdict}**", "",
+             "| check | result | detail |", "|---|---|---|"]
+    lines += [f"| {lbl} | {'pass' if ok_ else 'FAIL'} | {det or ''} |"
+              for lbl, ok_, det in summary_rows]
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def page_count(pdf: Path) -> int | None:
@@ -166,11 +184,14 @@ def main() -> int:
 
     print(f"\n{len(ok)} passed, {len(problems)} failed")
     if not pdf_ok:
+        write_summary("Briefing rejected — nothing committed.")
         print("::error::Briefing failed verification — committing nothing.")
         return 1
     if not spec_ok:
+        write_summary("PDF accepted; spec update rejected — previous spec stays current.")
         print("::warning::Spec update rejected — shipping the PDF and keeping the previous spec.")
         return 2
+    write_summary("PDF and spec both accepted.")
     return 0
 
 

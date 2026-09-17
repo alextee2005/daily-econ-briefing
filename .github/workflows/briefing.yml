@@ -63,6 +63,7 @@ jobs:
         run: |
           python3 scripts/test_gate.py
           python3 scripts/test_verify.py
+          python3 scripts/test_run_report.py
 
       - name: Decide whether to run
         id: gate
@@ -161,64 +162,17 @@ jobs:
               - Verify the render before you finish: the PDF must be exactly
                 4 pages and check_refs.py must exit clean.
 
-      - name: Check the briefing output, and diagnose if it is missing
+      - name: Report what each stage produced
         if: always() && steps.gate.outputs.should_run == 'true'
         run: |
-          # Runs on success as well as failure: the case that needs diagnosis
-          # most is the action reporting success while producing nothing, which
-          # a failure()-gated step never sees.
-          PDF="${{ steps.gate.outputs.pdf_path }}"
-          [ -f "$PDF" ] && { echo "PDF present: $PDF"; exit 0; }
-
-          echo "::error::The briefing step produced no PDF at $PDF"
-          echo
-          echo "--- files Claude left behind ---"
-          ls -la build/ 2>/dev/null || echo "  (no build/ directory)"
-          git status --porcelain | head -40 || true
-          echo
-          echo "--- what Claude did ---"
-          LOG="${RUNNER_TEMP}/claude-execution-output.json"
-          if [ -f "$LOG" ]; then
-            python3 - "$LOG" <<'PY'
-          import json, sys
-          try:
-              data = json.load(open(sys.argv[1]))
-          except Exception as exc:
-              print("  could not parse execution log:", exc); raise SystemExit(0)
-          entries = data if isinstance(data, list) else [data]
-
-          tools, texts = [], []
-          for e in entries:
-              if not isinstance(e, dict):
-                  continue
-              if e.get("type") == "result":
-                  for k in ("subtype", "is_error", "error", "result",
-                            "num_turns", "duration_ms", "permission_denials_count"):
-                      if k in e:
-                          print(f"  {k}: {str(e[k])[:500]}")
-              msg = e.get("message") or {}
-              for block in (msg.get("content") or []) if isinstance(msg, dict) else []:
-                  if not isinstance(block, dict):
-                      continue
-                  if block.get("type") == "tool_use":
-                      tools.append(block.get("name", "?"))
-                  elif block.get("type") == "text" and block.get("text", "").strip():
-                      texts.append(block["text"].strip())
-
-          if tools:
-              print("\n  tool calls in order:")
-              print("   ", " -> ".join(tools[:60]))
-          if texts:
-              print("\n  Claude's last messages:")
-              for t in texts[-3:]:
-                  print("   ---")
-                  for line in t[:1200].splitlines():
-                      print("   ", line)
-          PY
-          else
-            echo "  no execution log at $LOG"
-          fi
-          exit 1
+          # Runs on success and failure alike. A run costs ~18 minutes and real
+          # quota, so one run has to say where it broke rather than only that
+          # it did. The table also lands in the job summary.
+          python3 scripts/run_report.py \
+            --pdf "${{ steps.gate.outputs.pdf_path }}" \
+            --html build/briefing.html \
+            --new-spec "${{ steps.gate.outputs.next_spec_path }}" \
+            --require-pdf
 
       - name: Verify the output
         if: steps.gate.outputs.should_run == 'true'
@@ -236,7 +190,7 @@ jobs:
           [ "$CODE" = "1" ] && exit 1 || exit 0
 
       - name: Upload build for inspection
-        if: steps.gate.outputs.should_run == 'true' && (inputs.dry_run || failure())
+        if: always() && steps.gate.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: briefing-${{ steps.gate.outputs.edition_date }}
