@@ -157,6 +157,17 @@ jobs:
                instruction the next run will get — never truncate a section or
                drop a rule unless you meant to.
 
+            Two things edition 22 got wrong — check both before you finish:
+
+              - The document's date line is the EDITION date above, not the
+                session it covers. Editions 20 and 21 both read "Tuesday 15
+                September 2026" and "Wednesday 16 September 2026" matching
+                their filenames; edition 22 used the session date instead and
+                so carried the same headline date as edition 21. The window
+                line is where the sessions covered belong.
+              - The locked structure ends with a Method note, after Annex B.
+                Edition 22 omitted it.
+
             Environment notes:
               - Chromium is installed and PLAYWRIGHT_BROWSERS_PATH is set.
                 Do NOT run `playwright install`.
