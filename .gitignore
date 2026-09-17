@@ -1,0 +1,11 @@
+# Per-run build scratch: briefing.html, chart PNGs, page images.
+build/
+
+# Toolchain installed by the workflow at run time.
+node_modules/
+package-lock.json
+.pw-browsers/
+
+# Python
+__pycache__/
+*.pyc

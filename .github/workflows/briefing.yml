@@ -1,0 +1,234 @@
+name: Daily Economic Briefing
+
+# Generates the briefing PDF, commits it to editions/, and hands it to the
+# existing "Deliver briefing to Telegram" workflow.
+#
+# Two cron entries fire every weekday so that one of them always lands at
+# 20:00 America/New_York — about four hours after the US close — on both sides
+# of the US daylight-saving switch. scripts/gate.py lets exactly one through:
+# in summer the 00:00 UTC fire runs (07:00 GMT+7) and the 01:00 one finds the
+# edition already published; in winter the 00:00 fire is 19:00 EST and stops
+# itself, and the 01:00 fire runs (08:00 GMT+7).
+
+on:
+  schedule:
+    - cron: "0 0 * * 1-5" # 20:00 ET during US daylight time — 07:00 GMT+7
+    - cron: "0 1 * * 1-5" # 20:00 ET during US standard time — 08:00 GMT+7
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if the gate would skip (too early / already published / no session)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Build and verify, but commit nothing — upload the PDF as a run artifact instead"
+        type: boolean
+        default: false
+      edition_date:
+        description: "Override the edition date (YYYY-MM-DD)"
+        type: string
+        default: ""
+      model:
+        description: "Model for the run"
+        type: string
+        default: "claude-sonnet-5"
+
+permissions:
+  contents: write # commit the edition and the updated spec
+  actions: write # dispatch the delivery workflow
+  id-token: write # claude-code-action's default GitHub App auth
+
+concurrency:
+  group: daily-briefing
+  cancel-in-progress: false
+
+env:
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install gate dependencies
+        run: pip install --quiet -r requirements.txt
+
+      - name: Self-test the schedule logic
+        run: python3 scripts/test_gate.py
+
+      - name: Decide whether to run
+        id: gate
+        run: |
+          python3 scripts/gate.py \
+            ${{ inputs.force && '--force' || '' }} \
+            ${{ inputs.edition_date != '' && format('--edition-date {0}', inputs.edition_date) || '' }}
+
+      - name: Install the render toolchain
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          mkdir -p build
+          # render_pdf.js globs PLAYWRIGHT_BROWSERS_PATH for chromium-*; confirm
+          # it resolves now rather than discovering it after an hour of research.
+          node -e "
+            const fs=require('fs'),p=require('path'),r=process.env.PLAYWRIGHT_BROWSERS_PATH;
+            const c=fs.readdirSync(r).filter(d=>d.startsWith('chromium-'))
+              .map(d=>p.join(r,d,'chrome-linux','chrome')).filter(fs.existsSync);
+            if(!c.length) throw new Error('no chromium under '+r);
+            console.log('chromium ->',c[0]);
+          "
+
+      - name: Generate the briefing
+        if: steps.gate.outputs.should_run == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Scheduled runs are attributed to whoever last edited the cron; if
+          # that is ever an app rather than a person, the actor check would
+          # otherwise reject the run.
+          allowed_bots: "github-actions[bot],claude[bot]"
+          claude_args: |
+            --model ${{ inputs.model || 'claude-sonnet-5' }}
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Task,TodoWrite"
+          prompt: |
+            /daily-economic-briefing
+
+            Scheduled, non-interactive run. There is nobody to ask: if a figure
+            cannot be verified, it goes in Annex A rather than being estimated.
+
+            Read the standing spec first and treat it as your instructions:
+              ${{ steps.gate.outputs.spec_path }}
+
+            This edition:
+              Edition date      ${{ steps.gate.outputs.edition_date }}
+              Research window   ${{ steps.gate.outputs.window_start_et }} to ${{ steps.gate.outputs.cutoff_et }}
+              Sessions covered  ${{ steps.gate.outputs.sessions_covered }}
+              Previous edition  ${{ steps.gate.outputs.prev_edition_date }}
+
+            The window above is authoritative — it comes from the NYSE calendar
+            and the last committed edition. Still run `date -u` and sanity-check
+            every figure's session date against it.
+
+            Produce exactly two outputs:
+
+            1. The PDF at ${{ steps.gate.outputs.pdf_path }}
+               Do your scratch work in build/ — write build/briefing.html and
+               the chart PNGs there, and leave briefing.html in place, because a
+               later step runs check_refs.py against it.
+
+            2. The spec for the next run, at ${{ steps.gate.outputs.next_spec_path }}
+               The full spec carried forward: standing facts re-verified against
+               primary sources, a new row appended to the edition log, older
+               editions condensed per the log's own convention, and open threads
+               updated. Its content is yours to change, but it is the only
+               instruction the next run will get — never truncate a section or
+               drop a rule unless you meant to.
+
+            Environment notes:
+              - Chromium is installed and PLAYWRIGHT_BROWSERS_PATH is set.
+                Do NOT run `playwright install`.
+              - matplotlib and pdftoppm are installed.
+              - Do NOT run any git command. A later step commits and pushes.
+              - Verify the render before you finish: the PDF must be exactly
+                4 pages and check_refs.py must exit clean.
+
+      - name: Verify the output
+        if: steps.gate.outputs.should_run == 'true'
+        id: verify
+        run: |
+          set +e
+          python3 scripts/verify_edition.py \
+            --pdf "${{ steps.gate.outputs.pdf_path }}" \
+            --html build/briefing.html \
+            --new-spec "${{ steps.gate.outputs.next_spec_path }}" \
+            --prev-spec "${{ steps.gate.outputs.spec_path }}" \
+            --edition-date "${{ steps.gate.outputs.edition_date }}"
+          CODE=$?
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          [ "$CODE" = "1" ] && exit 1 || exit 0
+
+      - name: Upload build for inspection
+        if: steps.gate.outputs.should_run == 'true' && (inputs.dry_run || failure())
+        uses: actions/upload-artifact@v4
+        with:
+          name: briefing-${{ steps.gate.outputs.edition_date }}
+          path: |
+            build/
+            ${{ steps.gate.outputs.pdf_path }}
+            ${{ steps.gate.outputs.next_spec_path }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Commit and push
+        if: steps.gate.outputs.should_run == 'true' && !inputs.dry_run && steps.verify.outputs.code != '1'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- "${{ steps.gate.outputs.pdf_path }}"
+
+          if [ "${{ steps.verify.outputs.code }}" = "2" ]; then
+            # Spec rejected: ship the briefing, keep the previous spec current.
+            rm -f -- "${{ steps.gate.outputs.next_spec_path }}"
+            MSG="Add edition for ${{ steps.gate.outputs.edition_date }} (spec update rejected)"
+          else
+            git add -- "${{ steps.gate.outputs.next_spec_path }}"
+            MSG="Add edition for ${{ steps.gate.outputs.edition_date }}"
+          fi
+
+          git commit -m "$MSG" -m "Covers ${{ steps.gate.outputs.sessions_covered }}, cutoff ${{ steps.gate.outputs.cutoff_et }}."
+          git push origin HEAD:main
+
+      - name: Deliver to Telegram
+        if: steps.gate.outputs.should_run == 'true' && !inputs.dry_run && steps.verify.outputs.code != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A push made with GITHUB_TOKEN does not trigger deliver.yml's push
+          # trigger, so invoke it explicitly through the workflow_dispatch input
+          # it already exposes. deliver.yml itself is untouched.
+          curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/deliver.yml/dispatches" \
+            -d "$(jq -nc --arg f '${{ steps.gate.outputs.pdf_path }}' \
+                  '{ref:"main", inputs:{file:$f}}')"
+          echo "Dispatched delivery for ${{ steps.gate.outputs.pdf_path }}"
+
+      - name: Report a rejected spec update
+        if: steps.verify.outputs.code == '2' && !inputs.dry_run
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "${TOKEN:-}" ] && [ -n "${CHAT:-}" ] || exit 0
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -o /dev/null \
+            -F "chat_id=${CHAT}" \
+            -F "text=Briefing ${{ steps.gate.outputs.edition_date }} shipped, but its spec update was rejected — the next run will reuse the previous spec. Run: ${RUN}" \
+            "https://api.telegram.org/bot${TOKEN}/sendMessage" || true
+
+      - name: Report a failed run
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # A briefing that silently fails at 7am is worse than one that fails
+          # loudly, so this is best-effort and never fails the job itself.
+          [ -n "${TOKEN:-}" ] && [ -n "${CHAT:-}" ] || exit 0
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -o /dev/null \
+            -F "chat_id=${CHAT}" \
+            -F "text=Daily Economic Briefing failed for ${{ steps.gate.outputs.edition_date || 'today' }}. Run: ${RUN}" \
+            "https://api.telegram.org/bot${TOKEN}/sendMessage" || true

@@ -1,0 +1,4 @@
+# Pipeline dependencies. matplotlib is used by the skill's chart script;
+# pandas-market-calendars supplies the NYSE session calendar the gate runs on.
+matplotlib==3.10.7
+pandas-market-calendars==5.4.0
