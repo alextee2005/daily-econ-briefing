@@ -195,5 +195,10 @@ since the spec then stops advancing.
   look there rather than at the render.
 - **PDF committed but no Telegram** → check the "Deliver to Telegram" step
   dispatched, then look at the `deliver.yml` run it triggered.
+- **`Invalid username or token` on push** → `claude-code-action` rewrites
+  `origin` to carry its own GitHub App token and revokes that token when it
+  finishes, leaving a dead credential behind. The commit step resets the remote
+  URL before pushing; if that line is removed, every push fails this way while
+  the commit itself still succeeds.
 - **Missed a day** → do nothing. The next run widens its window automatically.
   To backfill a specific date, dispatch with `force` and `edition_date`.
