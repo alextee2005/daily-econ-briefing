@@ -85,7 +85,7 @@ Repository secrets:
 
 | secret | for | notes |
 |---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | the Claude step | `claude setup-token` locally. Expires — regenerate when runs start failing on auth |
+| `ANTHROPIC_API_KEY` | the Claude step | A key from [platform.claude.com](https://platform.claude.com). Billed per run, not against a subscription |
 | `TELEGRAM_BOT_TOKEN` | delivery + alerts | already set |
 | `TELEGRAM_CHAT_ID` | delivery + alerts | already set |
 
@@ -131,10 +131,18 @@ after touching `gate.py`. The workflow runs it too, before spending anything.
 
 ## Cost
 
-The briefing spawns four parallel research subagents doing heavy web research.
-The model defaults to **Sonnet**; switch a single run to Opus with the `model`
-dispatch input, or change the default in `briefing.yml`. Runs bill against the
-subscription behind `CLAUDE_CODE_OAUTH_TOKEN`, not the API.
+The briefing spawns four parallel research subagents doing heavy web research,
+so a run is not cheap. Billing is **per run against `ANTHROPIC_API_KEY`**, not a
+subscription, so every weekday edition costs real money.
+
+The model defaults to **Sonnet** — switch a single run to Opus with the `model`
+dispatch input, or change the default in `briefing.yml`. Opus is several times
+the price for this workload; Sonnet is the sensible standing default and Opus a
+deliberate choice for an edition that warrants it.
+
+Watch the first few runs' actual cost in the Console before assuming the monthly
+figure. If it runs higher than expected, the levers are the model, how many
+research subagents the spec asks for, and how much each one fetches.
 
 ## When something breaks
 
@@ -142,7 +150,9 @@ A failed run sends a Telegram message with a link to it. A run that shipped the
 PDF but had its spec update rejected sends a different message — worth acting on,
 since the spec then stops advancing.
 
-- **Auth failure** → regenerate `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Auth failure** (`401 Invalid bearer token`) → check `ANTHROPIC_API_KEY`.
+  The "Diagnose a failed briefing step" step prints Claude's own error;
+  a 401 is the credential, not the code.
 - **PDF is 5 pages** → almost always a stray forced page break, not overflow.
   The spec's production notes cover this; `grep -n 'pagebreak'` first.
 - **No Chromium** → the toolchain step checks for it explicitly and fails early;
