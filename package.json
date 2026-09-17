@@ -1,0 +1,8 @@
+{
+  "name": "daily-econ-briefing",
+  "private": true,
+  "description": "Chromium print-to-PDF renderer for the daily briefing.",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
