@@ -66,6 +66,18 @@ for label, now, editions, want_run, want_sub in CASES:
         print(f"      want run={want_run} containing {want_sub!r}")
         print(f"      got  run={ran} from {haystack.strip()!r}")
 
+# A forced run at an arbitrary hour must not claim a session that has not closed.
+# 04:36Z on Thu 17 Sept is 00:36 ET Thursday: the window ends Wednesday.
+with tempfile.TemporaryDirectory() as td:
+    repo = fake_repo(Path(td), ["2026-09-16"], SPEC)
+    odd = decide(
+        datetime.fromisoformat("2026-09-17T04:36").replace(tzinfo=timezone.utc), repo, True, None
+    )
+passed = odd["sessions_covered"] == "2026-09-16" and odd["cutoff_et"] == "2026-09-16 20:00 ET"
+failures += not passed
+print(f"{'PASS' if passed else 'FAIL'}  forced off-hours run stops at the last closed session "
+      f"(covers {odd['sessions_covered']}, cutoff {odd['cutoff_et']})")
+
 # --force must override every skip reason, so a manual re-run is always possible.
 with tempfile.TemporaryDirectory() as td:
     repo = fake_repo(Path(td), ["2026-11-26"], SPEC)

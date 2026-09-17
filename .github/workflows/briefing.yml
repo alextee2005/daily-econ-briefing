@@ -76,15 +76,18 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
           mkdir -p build
-          # render_pdf.js globs PLAYWRIGHT_BROWSERS_PATH for chromium-*; confirm
-          # it resolves now rather than discovering it after an hour of research.
-          node -e "
-            const fs=require('fs'),p=require('path'),r=process.env.PLAYWRIGHT_BROWSERS_PATH;
-            const c=fs.readdirSync(r).filter(d=>d.startsWith('chromium-'))
-              .map(d=>p.join(r,d,'chrome-linux','chrome')).filter(fs.existsSync);
-            if(!c.length) throw new Error('no chromium under '+r);
-            console.log('chromium ->',c[0]);
-          "
+          # Ask Playwright where it actually put the binary rather than guessing
+          # at the layout: Chrome-for-Testing builds use chrome-linux64/, older
+          # ones chrome-linux/. render_pdf.js prefers CHROMIUM_PATH over its own
+          # lookup, so resolving it here pins the right one for the render.
+          CHROMIUM_PATH="$(node -e 'console.log(require("playwright").chromium.executablePath())')"
+          if [ ! -x "$CHROMIUM_PATH" ]; then
+            echo "::error::chromium not executable at ${CHROMIUM_PATH:-<empty>}"
+            ls -la "$PLAYWRIGHT_BROWSERS_PATH" || true
+            exit 1
+          fi
+          echo "CHROMIUM_PATH=$CHROMIUM_PATH" >> "$GITHUB_ENV"
+          echo "chromium -> $CHROMIUM_PATH"
 
       - name: Generate the briefing
         if: steps.gate.outputs.should_run == 'true'
@@ -139,6 +142,23 @@ jobs:
               - Do NOT run any git command. A later step commits and pushes.
               - Verify the render before you finish: the PDF must be exactly
                 4 pages and check_refs.py must exit clean.
+
+      - name: Confirm Claude actually ran
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          # claude-code-action refuses to run when this workflow file differs
+          # from the copy on the default branch, and exits reporting SUCCESS —
+          # so the step above goes green having done nothing. Catch that here
+          # with a message that names the cause, rather than letting the
+          # verifier report a confusing "PDF does not exist".
+          if [ ! -f "${{ steps.gate.outputs.pdf_path }}" ]; then
+            echo "::error::The briefing step produced no PDF."
+            echo "If its log shows 'Workflow validation failed', this run used a"
+            echo "briefing.yml that differs from the one on the default branch."
+            echo "Changes to this workflow cannot be dry-run from a branch —"
+            echo "they have to be merged to the default branch first."
+            exit 1
+          fi
 
       - name: Verify the output
         if: steps.gate.outputs.should_run == 'true'

@@ -104,10 +104,18 @@ def decide(now_utc: datetime, repo: Path, force: bool, edition_date: date | None
         if prev_ed == ed_date:
             return skip(f"edition {ed_date} already published")
 
+    # The window ends with the session that has actually closed. On the normal
+    # schedule now_et.hour is always >= 20, so this is today and the branch is a
+    # no-op — but --force can land at any hour, and a window running to
+    # now_et.date() at 00:30 ET would include a session that has not yet opened.
+    window_end = (
+        now_et.date() if now_et.hour >= CUTOFF_HOUR_ET else now_et.date() - timedelta(days=1)
+    )
+
     # The previous edition covered the session(s) up to 20:00 ET on the day
     # before its own date, so that is where this window starts.
-    prev_cutoff = (prev_ed - timedelta(days=1)) if prev_ed else (now_et.date() - timedelta(days=1))
-    covered = nyse_sessions(prev_cutoff + timedelta(days=1), now_et.date())
+    prev_cutoff = (prev_ed - timedelta(days=1)) if prev_ed else (window_end - timedelta(days=1))
+    covered = nyse_sessions(prev_cutoff + timedelta(days=1), window_end)
 
     if not covered and not force:
         return skip(f"no NYSE session has closed since {prev_cutoff}")
@@ -124,7 +132,14 @@ def decide(now_utc: datetime, repo: Path, force: bool, edition_date: date | None
         "should_run": "true",
         "skip_reason": "",
         "edition_date": ed_date.isoformat(),
-        "cutoff_et": now_et.strftime("%Y-%m-%d %H:%M ET"),
+        # Report the real cutoff on a normal run; on a forced off-hours run,
+        # report the close of the last session in the window, so the stated
+        # cutoff never sits after data the run is not supposed to have.
+        "cutoff_et": (
+            now_et.strftime("%Y-%m-%d %H:%M ET")
+            if now_et.hour >= CUTOFF_HOUR_ET
+            else f"{window_end} {CUTOFF_HOUR_ET}:00 ET"
+        ),
         "window_start_et": f"{prev_cutoff} 20:00 ET",
         "sessions_covered": ",".join(d.isoformat() for d in covered) or "none",
         "prev_edition_date": prev_ed.isoformat() if prev_ed else "none",

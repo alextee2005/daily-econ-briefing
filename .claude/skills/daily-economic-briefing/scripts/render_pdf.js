@@ -22,7 +22,11 @@ function findChromium() {
   const candidates = fs.existsSync(root)
     ? fs.readdirSync(root)
         .filter((d) => d.startsWith('chromium-'))
-        .map((d) => path.join(root, d, 'chrome-linux', 'chrome'))
+        // Chrome-for-Testing builds (Playwright >= ~1.5x) unpack to
+        // chrome-linux64/; older builds to chrome-linux/. Try both.
+        .flatMap((d) =>
+          ['chrome-linux64', 'chrome-linux'].map((sub) => path.join(root, d, sub, 'chrome'))
+        )
         .filter((p) => fs.existsSync(p))
     : [];
   if (!candidates.length) {
