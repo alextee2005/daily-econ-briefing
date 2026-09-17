@@ -18,6 +18,7 @@ import argparse
 import re
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -109,9 +110,44 @@ def verify_spec(new: Path, prev: Path, edition_date: str) -> bool:
     # what not to repeat. It is the one piece of structure the pipeline itself
     # depends on, so it is the one piece that is not Claude's to drop.
     good &= check("edition log present", re.search(r"^##\s+Edition log", text, re.M) is not None)
-    good &= check("new edition recorded in the log", edition_date in text, edition_date)
+
+    logged, detail = edition_was_logged(text, prev.read_text(encoding="utf-8") if prev.is_file() else "",
+                                        edition_date)
+    good &= check("new edition recorded in the log", logged, detail)
 
     return good
+
+
+def edition_was_logged(new_text: str, prev_text: str, edition_date: str) -> tuple[bool, str]:
+    """Did this run actually append an edition to the log?
+
+    The log numbers its entries and writes dates in prose ("Wed 16 Sept 2026"),
+    never ISO — so matching on the ISO edition date never fires. Prefer the
+    edition number, which is unambiguous and survives any date style, and fall
+    back to recognising the date in the shapes the log actually uses.
+    """
+    def highest(text):
+        # Only bold headings that *begin* with "Edition", so prose references
+        # such as "**Open threads for edition 22:**" — which name an edition
+        # before it exists — are not mistaken for entries.
+        log = text.split("## Edition log", 1)[-1]
+        nums = [int(n) for n in re.findall(r"\*\*Editions?\s+(\d{1,4})", log)]
+        return max(nums) if nums else None
+
+    before, after = highest(prev_text), highest(new_text)
+    if before is not None and after is not None:
+        return after > before, f"highest edition {before} -> {after}"
+
+    d = date.fromisoformat(edition_date)
+    # The log abbreviates September as "Sept", which %b never produces, so
+    # include the four-letter truncation alongside the usual renderings.
+    months = {d.strftime("%b"), d.strftime("%B"), d.strftime("%B")[:4]}
+    forms = {edition_date}
+    for m in months:
+        forms |= {f"{d.day} {m} {d.year}", f"{d:%d} {m} {d.year}",
+                  f"{m} {d.day}", f"{m} {d.day}, {d.year}"}
+    hit = next((f for f in forms if f in new_text), None)
+    return bool(hit), f"matched {hit!r}" if hit else "no edition number or recognisable date"
 
 
 def main() -> int:

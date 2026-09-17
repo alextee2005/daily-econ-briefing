@@ -59,8 +59,10 @@ jobs:
       - name: Install gate dependencies
         run: pip install --quiet -r requirements.txt
 
-      - name: Self-test the schedule logic
-        run: python3 scripts/test_gate.py
+      - name: Self-test the schedule and validation logic
+        run: |
+          python3 scripts/test_gate.py
+          python3 scripts/test_verify.py
 
       - name: Decide whether to run
         id: gate
