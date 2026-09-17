@@ -76,15 +76,18 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
           mkdir -p build
-          # render_pdf.js globs PLAYWRIGHT_BROWSERS_PATH for chromium-*; confirm
-          # it resolves now rather than discovering it after an hour of research.
-          node -e "
-            const fs=require('fs'),p=require('path'),r=process.env.PLAYWRIGHT_BROWSERS_PATH;
-            const c=fs.readdirSync(r).filter(d=>d.startsWith('chromium-'))
-              .map(d=>p.join(r,d,'chrome-linux','chrome')).filter(fs.existsSync);
-            if(!c.length) throw new Error('no chromium under '+r);
-            console.log('chromium ->',c[0]);
-          "
+          # Ask Playwright where it actually put the binary rather than guessing
+          # at the layout: Chrome-for-Testing builds use chrome-linux64/, older
+          # ones chrome-linux/. render_pdf.js prefers CHROMIUM_PATH over its own
+          # lookup, so resolving it here pins the right one for the render.
+          CHROMIUM_PATH="$(node -e 'console.log(require("playwright").chromium.executablePath())')"
+          if [ ! -x "$CHROMIUM_PATH" ]; then
+            echo "::error::chromium not executable at ${CHROMIUM_PATH:-<empty>}"
+            ls -la "$PLAYWRIGHT_BROWSERS_PATH" || true
+            exit 1
+          fi
+          echo "CHROMIUM_PATH=$CHROMIUM_PATH" >> "$GITHUB_ENV"
+          echo "chromium -> $CHROMIUM_PATH"
 
       - name: Generate the briefing
         if: steps.gate.outputs.should_run == 'true'
