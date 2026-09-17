@@ -68,6 +68,36 @@ The spec checks are structural, not editorial — Claude has free rein over the
 spec's content. What they prevent is a truncated or half-written spec becoming
 the instructions for every future run.
 
+## Diagnosing a run
+
+Every run writes a **stage table to the job summary** (the Actions run page,
+above the logs) showing how far it got:
+
+| stage | status | detail |
+|---|---|---|
+| 1. Read the standing spec | ok | 1 Read calls |
+| 2. Research passes | PARTIAL | 4 subagents, 31 web lookups |
+| 3. Charts rendered | MISSING | 0 PNG(s) in build/ |
+| … | | |
+
+**First stage that did not complete** names where it broke. `PARTIAL` means
+Claude invoked the thing but no output appeared — it failed while running.
+`MISSING` means the stage was never reached. Below the table sit Claude's own
+result fields, its closing messages, and the tool-call sequence.
+
+The verification checks append to the same summary, so one page covers the
+whole run and a failure rarely needs a second one. Every run also uploads its
+`build/` directory, the PDF and the new spec as an artifact, successes
+included.
+
+This exists because a run costs ~18 minutes and real quota. Read the stage
+table first; go to the raw logs only when it is not enough.
+
+`scripts/run_report.py` builds the table and is pinned by
+`scripts/test_run_report.py` against the run shapes this pipeline actually hit
+— backgrounded research that built nothing, a spec that was never written, and
+an auth failure where no stage ran.
+
 ## Spec versioning
 
 Specs live in `spec/daily-economic-briefing-spec-<ISO>.md`. "Latest" is the
@@ -125,9 +155,13 @@ default branch before it can be exercised at all. Edits to `gate.py`,
 `verify_edition.py` or the vendored skill are not affected — only the workflow
 file itself is compared.
 
-Locally: `python3 scripts/test_gate.py` pins the schedule logic across DST, the
-two-cron arrangement, market holidays, multi-day gaps and cron delay. Run it
-after touching `gate.py`. The workflow runs it too, before spending anything.
+Locally, three suites — the workflow runs all three before spending anything:
+
+```bash
+python3 scripts/test_gate.py        # schedule: DST, holidays, gaps, cron delay
+python3 scripts/test_verify.py      # spec validation, incl. the edition log
+python3 scripts/test_run_report.py  # stage detection on real failure shapes
+```
 
 ## Cost
 
