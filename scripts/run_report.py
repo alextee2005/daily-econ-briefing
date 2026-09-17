@@ -10,8 +10,13 @@ Evidence is deliberately of two kinds per stage where possible: an artifact
 that produces it). A stage with the action but not the artifact failed while
 running; a stage with neither was never reached.
 
+It also reports what the run cost, and — where the raw log allows — which
+tools were denied or errored. `permission_denials_count: 1` on its own says
+something was blocked without saying what, which is not enough to act on.
+
 Usage:
-    python3 scripts/run_report.py --pdf P --html H --new-spec S [--log L] [--require-pdf]
+    python3 scripts/run_report.py --pdf P --html H --new-spec S [--log L]
+                                  [--allowed-tools "A,B,C"] [--require-pdf]
 
 Writes the table to stdout and, when set, to $GITHUB_STEP_SUMMARY.
 """
@@ -20,26 +25,45 @@ import argparse
 import json
 import os
 import re
-import sys
+from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parent.parent
 
 OK, MISSING, PARTIAL = "ok", "missing", "partial"
 MARK = {OK: "ok", MISSING: "MISSING", PARTIAL: "PARTIAL"}
 
+# A denied tool call comes back as an error result whose text says so. The
+# wording varies by version, so match the shapes rather than one exact string.
+DENIAL_RE = re.compile(
+    r"permission|denied|not allowed|haven't granted|has not granted|"
+    r"requested permissions|blocked by|not permitted",
+    re.I,
+)
 
-def load_log(path: Path):
-    """Tool calls and assistant text from the SDK execution log."""
+
+class Run(NamedTuple):
+    calls: list          # (tool_name, serialised_input)
+    texts: list          # assistant text blocks
+    result: dict         # the SDK result entry
+    denials: list        # (tool_name, reason)
+    errors: list         # (tool_name, message) for non-denial tool errors
+
+
+def load_log(path: Path) -> Run:
+    """Tool calls, assistant text, denials and tool errors from the SDK log."""
     if not path or not path.is_file():
-        return [], [], {}
+        return Run([], [], {}, [], [])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return [], [], {}
+        return Run([], [], {}, [], [])
     entries = data if isinstance(data, list) else [data]
 
-    calls, texts, result = [], [], {}
+    calls, texts, result, denials, errors = [], [], {}, [], []
+    by_id = {}  # tool_use_id -> tool name, so a result can name its tool
+
     for e in entries:
         if not isinstance(e, dict):
             continue
@@ -50,11 +74,28 @@ def load_log(path: Path):
         for b in blocks or []:
             if not isinstance(b, dict):
                 continue
-            if b.get("type") == "tool_use":
-                calls.append((b.get("name", "?"), json.dumps(b.get("input", ""))[:4000]))
-            elif b.get("type") == "text" and b.get("text", "").strip():
+            kind = b.get("type")
+            if kind == "tool_use":
+                name = b.get("name", "?")
+                calls.append((name, json.dumps(b.get("input", ""))[:4000]))
+                if b.get("id"):
+                    by_id[b["id"]] = name
+            elif kind == "text" and b.get("text", "").strip():
                 texts.append(b["text"].strip())
-    return calls, texts, result
+            elif kind == "tool_result":
+                content = b.get("content")
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") for c in content if isinstance(c, dict)
+                    )
+                content = str(content or "")
+                tool = by_id.get(b.get("tool_use_id"), "?")
+                if DENIAL_RE.search(content):
+                    denials.append((tool, content.strip()[:300]))
+                elif b.get("is_error"):
+                    errors.append((tool, content.strip()[:300]))
+
+    return Run(calls, texts, result, denials, errors)
 
 
 def ran(calls, name=None, pattern=None) -> int:
@@ -107,29 +148,89 @@ def build_stages(calls, pdf: Path, html: Path, spec: Path, build_dir: Path):
     ]
 
 
-def render(stages, result, texts, calls) -> str:
+def cost_line(result: dict) -> str:
+    """One line of what the run spent. Token counts are not in the log."""
+    if not result:
+        return "**Cost:** no result entry in the execution log."
+    bits = []
+    if (c := result.get("total_cost_usd")) is not None:
+        bits.append(f"**${c:.2f}**")
+    if (d := result.get("duration_ms")) is not None:
+        bits.append(f"{d / 60000:.1f} min")
+    if (t := result.get("num_turns")) is not None:
+        bits.append(f"{t} turns")
+    # The SDK's modelUsage carries context limits, not consumption, so there is
+    # no token count to report. Say so rather than leaving it looking omitted.
+    return ("**Cost:** " + ", ".join(bits) +
+            " — the log records cost but no token counts.")
+
+
+def denial_section(run: Run, allowed: str) -> list:
+    """Name what was denied. The count alone is not actionable."""
+    declared = {t.strip() for t in (allowed or "").split(",") if t.strip()}
+    stated = run.result.get("permission_denials_count")
+    out = []
+
+    if not run.denials:
+        if stated:
+            out += ["", f"**Permission denials: {stated}**, but the execution log "
+                        "records no denial message — the tool could not be identified."]
+        return out
+
+    counts = Counter(tool for tool, _ in run.denials)
+    out += ["", f"**Permission denials: {stated if stated is not None else len(run.denials)}**",
+            "", "| tool | times | in --allowedTools | first reason |", "|---|---|---|---|"]
+    for tool, n in counts.most_common():
+        reason = next(r for t, r in run.denials if t == tool)
+        listed = "yes" if tool in declared else ("**no**" if declared else "?")
+        out.append(f"| `{tool}` | {n} | {listed} | {reason[:160]} |")
+    if declared and any(t not in declared for t in counts):
+        out += ["", "A tool denied and absent from `--allowedTools` is a workflow "
+                    "fix: add it there. A denied tool that *is* listed is a "
+                    "different problem — check the settings the action applies."]
+    return out
+
+
+def error_section(run: Run) -> list:
+    if not run.errors:
+        return []
+    counts = Counter(tool for tool, _ in run.errors)
+    out = ["", f"**Tool errors (not permission-related): {len(run.errors)}**",
+           "", "| tool | times | first message |", "|---|---|---|"]
+    for tool, n in counts.most_common(8):
+        msg = next(m for t, m in run.errors if t == tool)
+        out.append(f"| `{tool}` | {n} | {msg[:160]} |")
+    return out
+
+
+def render(stages, run: Run, allowed: str = "") -> str:
     out = ["| stage | status | detail |", "|---|---|---|"]
     for name, status, detail in stages:
         out.append(f"| {name} | {MARK[status]} | {detail} |")
 
-    if result:
-        bits = [f"{k}={result[k]}" for k in
-                ("subtype", "is_error", "num_turns", "duration_ms", "permission_denials_count")
-                if k in result]
-        out += ["", "**Claude's own result:** " + ", ".join(bits)]
-        if result.get("result"):
-            out += ["", "> " + str(result["result"])[:600].replace("\n", "\n> ")]
+    out += ["", cost_line(run.result)]
+
+    if run.result:
+        bits = [f"{k}={run.result[k]}" for k in
+                ("subtype", "is_error", "num_turns", "permission_denials_count")
+                if k in run.result]
+        out += ["", "**Result:** " + ", ".join(bits)]
+        if run.result.get("result"):
+            out += ["", "> " + str(run.result["result"])[:600].replace("\n", "\n> ")]
 
     first_bad = next((n for n, s, _ in stages if s is not OK), None)
     if first_bad:
         out += ["", f"**First stage that did not complete: {first_bad}**"]
 
-    if calls:
-        seq = " -> ".join(t for t, _ in calls[:40])
+    out += denial_section(run, allowed)
+    out += error_section(run)
+
+    if run.calls:
+        seq = " -> ".join(t for t, _ in run.calls[:40])
         out += ["", "<details><summary>tool calls</summary>", "", "```", seq, "```", "</details>"]
-    if texts:
+    if run.texts:
         out += ["", "<details><summary>Claude's last messages</summary>", ""]
-        for t in texts[-2:]:
+        for t in run.texts[-2:]:
             out += ["```", t[:1000], "```"]
         out += ["</details>"]
     return "\n".join(out)
@@ -141,6 +242,8 @@ def main() -> int:
     ap.add_argument("--html", default="build/briefing.html")
     ap.add_argument("--new-spec", required=True)
     ap.add_argument("--log", default=os.environ.get("RUNNER_TEMP", "/tmp") + "/claude-execution-output.json")
+    ap.add_argument("--allowed-tools", default="",
+                    help="the --allowedTools list, to say whether a denied tool was declared")
     ap.add_argument("--repo", default=str(REPO))
     ap.add_argument("--require-pdf", action="store_true",
                     help="exit 1 when the PDF is missing, so the job fails")
@@ -148,10 +251,10 @@ def main() -> int:
 
     repo = Path(args.repo)
     pdf, html, spec = repo / args.pdf, repo / args.html, repo / args.new_spec
-    calls, texts, result = load_log(Path(args.log))
-    stages = build_stages(calls, pdf, html, spec, repo / "build")
+    run = load_log(Path(args.log))
+    stages = build_stages(run.calls, pdf, html, spec, repo / "build")
 
-    report = render(stages, result, texts, calls)
+    report = render(stages, run, args.allowed_tools)
     print(report)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a", encoding="utf-8") as fh:
