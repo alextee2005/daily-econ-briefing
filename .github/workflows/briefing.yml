@@ -93,7 +93,7 @@ jobs:
         if: steps.gate.outputs.should_run == 'true'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Scheduled runs are attributed to whoever last edited the cron; if
           # that is ever an app rather than a person, the actor check would
           # otherwise reject the run.
