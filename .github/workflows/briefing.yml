@@ -143,6 +143,23 @@ jobs:
               - Verify the render before you finish: the PDF must be exactly
                 4 pages and check_refs.py must exit clean.
 
+      - name: Confirm Claude actually ran
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          # claude-code-action refuses to run when this workflow file differs
+          # from the copy on the default branch, and exits reporting SUCCESS —
+          # so the step above goes green having done nothing. Catch that here
+          # with a message that names the cause, rather than letting the
+          # verifier report a confusing "PDF does not exist".
+          if [ ! -f "${{ steps.gate.outputs.pdf_path }}" ]; then
+            echo "::error::The briefing step produced no PDF."
+            echo "If its log shows 'Workflow validation failed', this run used a"
+            echo "briefing.yml that differs from the one on the default branch."
+            echo "Changes to this workflow cannot be dry-run from a branch —"
+            echo "they have to be merged to the default branch first."
+            exit 1
+          fi
+
       - name: Verify the output
         if: steps.gate.outputs.should_run == 'true'
         id: verify

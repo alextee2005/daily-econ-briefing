@@ -112,6 +112,19 @@ the PDF, then re-run without `dry_run`.
 `workflow_dispatch` also only works from the default branch, so the workflow has
 to be merged before it can be tested at all.
 
+**Changes to `briefing.yml` cannot be dry-run from a branch.**
+`claude-code-action` compares this workflow file against the copy on the default
+branch and refuses to run when they differ — a security control, since otherwise
+a branch could rewrite the workflow and read the secrets. It logs `Workflow
+validation failed` and then **exits reporting success**, so the step goes green
+having done nothing. The "Confirm Claude actually ran" step exists to turn that
+into a clear failure.
+
+The practical consequence: any edit to this workflow has to be merged to the
+default branch before it can be exercised at all. Edits to `gate.py`,
+`verify_edition.py` or the vendored skill are not affected — only the workflow
+file itself is compared.
+
 Locally: `python3 scripts/test_gate.py` pins the schedule logic across DST, the
 two-cron arrangement, market holidays, multi-day gaps and cron delay. Run it
 after touching `gate.py`. The workflow runs it too, before spending anything.
