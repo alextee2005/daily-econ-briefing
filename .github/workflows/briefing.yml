@@ -100,7 +100,7 @@ jobs:
           allowed_bots: "github-actions[bot],claude[bot]"
           claude_args: |
             --model ${{ inputs.model || 'claude-sonnet-5' }}
-            --allowedTools "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Task,TodoWrite"
+            --allowedTools "Skill,SlashCommand,Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Task,TodoWrite"
           prompt: |
             /daily-economic-briefing
 
@@ -142,6 +142,34 @@ jobs:
               - Do NOT run any git command. A later step commits and pushes.
               - Verify the render before you finish: the PDF must be exactly
                 4 pages and check_refs.py must exit clean.
+
+      - name: Diagnose a failed briefing step
+        if: failure() && steps.gate.outputs.should_run == 'true'
+        run: |
+          # The action hides Claude's output by default. Rather than turning on
+          # show_full_output — this repository is public, and that dumps the
+          # whole transcript — pull just the result-level error fields out of
+          # the execution log.
+          LOG="${RUNNER_TEMP}/claude-execution-output.json"
+          [ -f "$LOG" ] || { echo "no execution log at $LOG"; exit 0; }
+          python3 - "$LOG" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1]))
+          except Exception as exc:
+              print("could not parse execution log:", exc); raise SystemExit(0)
+          entries = data if isinstance(data, list) else [data]
+          keys = ("type", "subtype", "is_error", "error", "message", "result",
+                  "num_turns", "duration_ms", "permission_denials_count")
+          for e in entries:
+              if not isinstance(e, dict):
+                  continue
+              if e.get("is_error") or e.get("type") in ("result", "error", "system"):
+                  for k in keys:
+                      if k in e:
+                          print(f"  {k}: {str(e[k])[:600]}")
+                  print("  ---")
+          PY
 
       - name: Confirm Claude actually ran
         if: steps.gate.outputs.should_run == 'true'
