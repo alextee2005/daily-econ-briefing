@@ -48,6 +48,19 @@ CASES = [
      "2026-09-18T00:00", [], True, "2026-09-17"),
     ("legacy YYYYMMDD filenames still parse",
      "2026-09-09T00:00", ["20260908"], True, "2026-09-08"),
+    # The crons fire at :17, not :00 — the top of the hour is contended and the
+    # first scheduled run came 2h43m late from "0 0 * * 1-5". These pin the
+    # times actually in the workflow.
+    ("EDT 00:17Z — the real first cron runs",
+     "2026-09-22T00:17", ["2026-09-18"], True, "2026-09-21"),
+    ("EST 00:17Z — 19:17 ET is still too early",
+     "2026-12-02T00:17", ["2026-12-01"], False, "too early"),
+    ("EST 01:17Z — 20:17 ET runs",
+     "2026-12-02T01:17", ["2026-12-01"], True, "2026-12-01"),
+    # A badly delayed fire still has to produce the right edition: this is the
+    # 2h43m delay that actually happened, reproduced.
+    ("a 2h43m delayed fire still runs and covers the right session",
+     "2026-09-18T02:43", ["2026-09-17"], True, "2026-09-17"),
 ]
 
 failures = 0

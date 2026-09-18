@@ -3,17 +3,23 @@ name: Daily Economic Briefing
 # Generates the briefing PDF, commits it to editions/, and hands it to the
 # existing "Deliver briefing to Telegram" workflow.
 #
-# Two cron entries fire every weekday so that one of them always lands at
-# 20:00 America/New_York — about four hours after the US close — on both sides
-# of the US daylight-saving switch. scripts/gate.py lets exactly one through:
-# in summer the 00:00 UTC fire runs (07:00 GMT+7) and the 01:00 one finds the
-# edition already published; in winter the 00:00 fire is 19:00 EST and stops
-# itself, and the 01:00 fire runs (08:00 GMT+7).
+# Two cron entries fire every weekday so that one of them always lands just
+# after 20:00 America/New_York — about four hours after the US close — on both
+# sides of the US daylight-saving switch. scripts/gate.py lets exactly one
+# through: in summer the 00:17 UTC fire runs (07:17 GMT+7) and the 01:17 one
+# finds the edition already published; in winter the 00:17 fire is 19:17 EST
+# and stops itself, and the 01:17 fire runs (08:17 GMT+7).
 
 on:
   schedule:
-    - cron: "0 0 * * 1-5" # 20:00 ET during US daylight time — 07:00 GMT+7
-    - cron: "0 1 * * 1-5" # 20:00 ET during US standard time — 08:00 GMT+7
+    # Deliberately :17 rather than :00. The top of the hour — and midnight UTC
+    # above all — is the most contended minute in GitHub's cron scheduler,
+    # because it is the default everyone picks; queued scheduled jobs are
+    # low-priority and get displaced. The first scheduled run of this workflow
+    # fired 2h43m late from "0 0 * * 1-5". Seventeen minutes of nominal
+    # lateness buys a far better chance of starting on time.
+    - cron: "17 0 * * 1-5" # 20:17 ET during US daylight time — 07:17 GMT+7
+    - cron: "17 1 * * 1-5" # 20:17 ET during US standard time — 08:17 GMT+7
   workflow_dispatch:
     inputs:
       force:
