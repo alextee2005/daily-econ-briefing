@@ -2,3 +2,5 @@
 # pandas-market-calendars supplies the NYSE session calendar the gate runs on.
 matplotlib==3.10.7
 pandas-market-calendars==5.4.0
+# Reads the rendered PDF back to check the locked structure.
+pypdf==6.19.0

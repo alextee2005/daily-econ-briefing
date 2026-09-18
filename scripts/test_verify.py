@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verify_edition import edition_was_logged  # noqa: E402
+from verify_edition import REQUIRED_SECTIONS, edition_was_logged  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SEED = sorted((REPO / "spec").glob("daily-economic-briefing-spec-*.md"))[0].read_text()
@@ -50,6 +50,28 @@ for label, text, want in CASES:
 got, _ = edition_was_logged("## Edition log\nThu 17 Sept 2026 — first edition.\n", "", "2026-09-17")
 failures += not got
 print(f"{'PASS' if got else 'FAIL'}  cold start falls back to a prose date match")
+
+# --- the structure check must match sections, not the spec's labels ----------
+# A first version matched the literal string "Method note" and reported it
+# missing from all nine committed editions, including ones produced before this
+# pipeline existed — every edition renders it as a paragraph opening "Method:".
+import re  # noqa: E402
+
+REAL_FOOTERS = [
+    "Method: every figure traces to a named source in Annex B",
+    "Method note: produced by an automated recurring research process",
+    "Method:  produced by an automated recurring research/drafting process",
+]
+pattern = dict(REQUIRED_SECTIONS)["Method note"]
+for footer in REAL_FOOTERS:
+    hit = re.search(pattern, footer, re.I) is not None
+    failures += not hit
+    print(f"{'PASS' if hit else 'FAIL'}  method footer recognised: {footer[:46]}...")
+
+# And it must still notice a document that genuinely has no method section.
+absent = re.search(pattern, "Annex B — Sources\n[1] AP wire\n[2] Federal Reserve", re.I) is None
+failures += not absent
+print(f"{'PASS' if absent else 'FAIL'}  a document with no method section is still flagged")
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)
