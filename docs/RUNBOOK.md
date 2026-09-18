@@ -8,15 +8,27 @@ sits at **20:00 America/New_York** — about four hours after the US close:
 
 | | UTC fire | Bangkok | New York | outcome |
 |---|---|---|---|---|
-| Mar–Oct (EDT) | 00:00 | 07:00 | 20:00 | **runs** |
-| | 01:00 | 08:00 | 21:00 | skips — already published |
-| Nov–Mar (EST) | 00:00 | 07:00 | 19:00 | skips — too early |
-| | 01:00 | 08:00 | 20:00 | **runs** |
+| Mar–Oct (EDT) | 00:17 | 07:17 | 20:17 | **runs** |
+| | 01:17 | 08:17 | 21:17 | skips — already published |
+| Nov–Mar (EST) | 00:17 | 07:17 | 19:17 | skips — too early |
+| | 01:17 | 08:17 | 20:17 | **runs** |
 
-GitHub's scheduler is not punctual: runs routinely start 5–30 minutes late and
-are occasionally dropped entirely. Expect delivery around **07:30–08:15 GMT+7**.
-A dropped run is self-healing — the next day's gate widens the window and covers
-both sessions.
+**GitHub's scheduler is genuinely unreliable, not just slightly late.** The
+first scheduled run of this workflow fired **2h 43m** after its cron time, from
+`0 0 * * 1-5`. Midnight UTC on the hour is the most contended minute there is —
+it is the default everyone picks, and queued scheduled jobs are low-priority.
+Hence `:17`.
+
+Even so, treat the delivery time as a hope rather than a guarantee: plan for
+**07:20 GMT+7 at best and an hour or two later on a bad morning**. The gate
+accepts any fire from 20:00 ET onward, so a late run still produces a correct
+edition with an honest cutoff — it is the arrival time that slips, not the
+content. A dropped run is self-healing: the next day's gate widens the window
+and covers both sessions.
+
+If a hard delivery time ever matters more than simplicity, the cron has to go
+and be replaced by an external scheduler calling `workflow_dispatch`. Nothing
+inside GitHub Actions can make `schedule` punctual.
 
 Because a run happens at 20:00 ET *the evening before* its own date, a Monday
 run sits at 20:00 ET **Sunday** and produces the Friday-plus-weekend edition.
