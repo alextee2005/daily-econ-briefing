@@ -3,12 +3,18 @@ name: Daily Economic Briefing
 # Generates the briefing PDF, commits it to editions/, and hands it to the
 # existing "Deliver briefing to Telegram" workflow.
 #
-# Two cron entries fire every weekday so that one of them always lands just
-# after 20:00 America/New_York — about four hours after the US close — on both
-# sides of the US daylight-saving switch. scripts/gate.py lets exactly one
-# through: in summer the 00:17 UTC fire runs (07:17 GMT+7) and the 01:17 one
-# finds the edition already published; in winter the 00:17 fire is 19:17 EST
-# and stops itself, and the 01:17 fire runs (08:17 GMT+7).
+# Five cron entries fire every weekday, an hour apart. They are retries, not a
+# schedule: GitHub drops scheduled events outright, so the only defence is more
+# than one chance. scripts/gate.py lets exactly one through — the first fire
+# past 20:00 America/New_York, about four hours after the US close, produces
+# the edition and every later fire that day finds it already published and
+# stops in about 20 seconds.
+#
+# Each fire is independent on purpose. Chaining them — "retry only if the
+# previous one ran" — would reinstate the single point of failure, because the
+# failure being defended against is a fire that never happens at all. The
+# cancellation is carried by committed state (does today's edition exist?),
+# which no dropped fire can disturb.
 
 on:
   schedule:
@@ -16,10 +22,18 @@ on:
     # above all — is the most contended minute in GitHub's cron scheduler,
     # because it is the default everyone picks; queued scheduled jobs are
     # low-priority and get displaced. The first scheduled run of this workflow
-    # fired 2h43m late from "0 0 * * 1-5". Seventeen minutes of nominal
-    # lateness buys a far better chance of starting on time.
-    - cron: "17 0 * * 1-5" # 20:17 ET during US daylight time — 07:17 GMT+7
-    - cron: "17 1 * * 1-5" # 20:17 ET during US standard time — 08:17 GMT+7
+    # fired 2h43m late from "0 0 * * 1-5"; the next was dropped entirely.
+    #
+    # The ET cutoff makes the usable window slide with US daylight saving, so
+    # the set spans both: summer uses the first four, winter the last four.
+    # Four chances either way. Two entries gave four chances in summer but only
+    # ONE in winter, when 00:17 UTC is 19:17 EST and always too early — half
+    # the year had no redundancy at all.
+    - cron: "17 0 * * 1-5" # 20:17 EDT — 07:17 GMT+7 | 19:17 EST, too early
+    - cron: "17 1 * * 1-5" # 21:17 EDT — 08:17 GMT+7 | 20:17 EST — 08:17 GMT+7
+    - cron: "17 2 * * 1-5" # 22:17 EDT — 09:17 GMT+7 | 21:17 EST — 09:17 GMT+7
+    - cron: "17 3 * * 1-5" # 23:17 EDT — 10:17 GMT+7 | 22:17 EST — 10:17 GMT+7
+    - cron: "17 4 * * 1-5" # 00:17 EDT, too early     | 23:17 EST — 11:17 GMT+7
   workflow_dispatch:
     inputs:
       force:

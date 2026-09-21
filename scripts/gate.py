@@ -1,18 +1,19 @@
 """Decide whether today's briefing should run, and compute its window.
 
-The workflow fires two cron entries every weekday (00:00 and 01:00 UTC) so that
-one of them always lands at 20:00 America/New_York — roughly four hours after
-the US close — on both sides of the US daylight-saving switch. This script is
-what lets exactly one of them through.
+The workflow fires five cron entries every weekday, at :17 past 00:00 to 04:00
+UTC, because GitHub drops scheduled events outright and one fire is no defence
+against that. They are retries, and this script is what lets exactly one of
+them through: the first past 20:00 America/New_York — roughly four hours after
+the US close — on both sides of the US daylight-saving switch.
 
 Three independent reasons to skip:
 
   too-early    the ET clock says we are less than four hours past the close.
-               In winter the 00:00 UTC fire is 19:00 EST and must not run; the
-               01:00 UTC fire is 20:00 EST and must.
+               In winter the 00:17 UTC fire is 19:17 EST and must not run; the
+               01:17 UTC fire is 20:17 EST and must.
   already-run  an edition for this UTC date is already committed. This is what
-               stops the second cron entry duplicating the first, and makes a
-               manual re-run idempotent.
+               cancels the remaining retries once one of them has produced the
+               edition, and what makes a manual re-run idempotent.
   no-session   no NYSE session has closed since the previous edition's cutoff
                (the morning after a market holiday). Note this is deliberately
                *not* "was yesterday a trading day" — a Monday run sits at 20:00
