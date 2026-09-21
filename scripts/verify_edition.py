@@ -32,6 +32,28 @@ MAX_SPEC_BYTES = 120_000
 # truncation rather than a deliberate edit.
 MIN_SPEC_RATIO = 0.60
 
+# The locked structure, checked against the rendered PDF as a regex per
+# section, because the documents do not use the spec's labels verbatim: the
+# spec calls the last part a "Method note" and every edition renders it as a
+# paragraph opening "Method:". Matching the label rather than the section is
+# how a first version of this check reported the note missing from all nine
+# editions, including the ones produced before this pipeline existed.
+#
+# Findings are reported and do not block. Withholding a good briefing over a
+# formatting nit is the wrong trade — the same reasoning as exit code 2.
+REQUIRED_SECTIONS = [
+    ("60-second read", r"60-second read"),
+    ("Market recap", r"Market recap"),
+    ("Equities", r"Equities"),
+    ("Macro", r"Macro"),
+    ("Commodities", r"Commodities"),
+    ("Derivatives", r"Derivatives"),
+    ("The day ahead", r"day ahead"),
+    ("Annex A", r"Annex\s*A"),
+    ("Annex B", r"Annex\s*B"),
+    ("Method note", r"Method\s*(note|:)"),
+]
+
 ok, problems = [], []
 
 
@@ -45,6 +67,9 @@ def check(label: str, passed: bool, detail: str = "") -> bool:
     return passed
 
 
+missing_sections: list = []
+
+
 def write_summary(verdict: str) -> None:
     """Append the checks to the job summary, beside the stage table."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -54,6 +79,10 @@ def write_summary(verdict: str) -> None:
              "| check | result | detail |", "|---|---|---|"]
     lines += [f"| {lbl} | {'pass' if ok_ else 'FAIL'} | {det or ''} |"
               for lbl, ok_, det in summary_rows]
+    if missing_sections:
+        lines += ["", "**Locked sections missing from the rendered PDF:** "
+                  + ", ".join(f"`{s}`" for s in missing_sections)
+                  + " — reported, not blocking."]
     with open(path, "a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -103,6 +132,24 @@ def verify_pdf(pdf: Path, html: Path, repo: Path) -> bool:
         good = False
 
     return good
+
+
+def format_warnings(pdf: Path) -> list:
+    """Sections of the locked structure missing from the rendered PDF."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        print("  NOTE  pypdf unavailable; skipping the structure check")
+        return []
+    try:
+        text = "\n".join(pg.extract_text() or "" for pg in PdfReader(str(pdf)).pages)
+    except Exception as exc:
+        print(f"  NOTE  could not read the PDF for a structure check: {exc}")
+        return []
+    missing = [name for name, pattern in REQUIRED_SECTIONS
+               if not re.search(pattern, text, re.I)]
+    print(f"\nStructure — {'all sections present' if not missing else 'missing: ' + ', '.join(missing)}")
+    return missing
 
 
 def verify_spec(new: Path, prev: Path, edition_date: str) -> bool:
@@ -180,6 +227,9 @@ def main() -> int:
 
     repo = Path(args.repo)
     pdf_ok = verify_pdf(repo / args.pdf, repo / args.html, repo)
+    missing_sections[:] = format_warnings(repo / args.pdf) if pdf_ok else []
+    for sec in missing_sections:
+        print(f"::warning::The rendered PDF is missing a locked section: {sec}")
     spec_ok = verify_spec(repo / args.new_spec, repo / args.prev_spec, args.edition_date)
 
     print(f"\n{len(ok)} passed, {len(problems)} failed")

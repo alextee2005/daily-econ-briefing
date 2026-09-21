@@ -1,9 +1,10 @@
 """Pin the gate's schedule logic. Run: python3 scripts/test_gate.py
 
-These cases are the reason the two-cron arrangement is safe. Anyone changing
+These cases are the reason the retry-cron arrangement is safe. Anyone changing
 gate.py should be able to break exactly one of them at a time and see why.
 """
 
+import re
 import sys
 import tempfile
 from datetime import date, datetime, timezone
@@ -111,6 +112,58 @@ passed = Path(out["next_spec_path"]).name > Path(out["spec_path"]).name
 failures += not passed
 print(f"{'PASS' if passed else 'FAIL'}  next spec sorts after current "
       f"({Path(out['spec_path']).name} -> {Path(out['next_spec_path']).name})")
+
+# --- the retry slots, read from the workflow itself ---------------------------
+# The crons are retries: GitHub drops scheduled events, so the morning needs
+# more than one chance. What makes that safe is that the gate lets exactly one
+# fire through and stops the rest on "already published" — so these cases
+# assert both halves, against the cron list actually in briefing.yml rather
+# than a copy that can drift out of step with it.
+#
+# The winter count is the one that matters. Two entries looked like redundancy
+# but gave only ONE usable fire in EST, because 00:17 UTC is 19:17 there and
+# always too early: half the year had no second chance at all.
+WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/briefing.yml"
+slots = sorted(
+    (int(h), int(m))
+    for m, h in re.findall(r'^\s*- cron:\s*"(\d+)\s+(\d+) \* \* 1-5"', WORKFLOW.read_text(), re.M)
+)
+
+MIN_CHANCES = 4
+for label, fire_day, prior in [
+    ("EDT", date(2026, 7, 14), "2026-07-13"),
+    ("EST", date(2026, 12, 15), "2026-12-14"),
+]:
+    with tempfile.TemporaryDirectory() as td:
+        repo = fake_repo(Path(td), [prior], SPEC)
+        ran, early, published = [], [], []
+        for hour, minute in slots:
+            now = datetime(fire_day.year, fire_day.month, fire_day.day, hour, minute,
+                           tzinfo=timezone.utc)
+            got = decide(now, repo, False, None)
+            if got["should_run"] == "true":
+                ran.append(hour)
+                # Stand in for the run committing its edition, so the fires
+                # that follow see what they would really see.
+                (repo / "editions" /
+                 f"Daily_Economic_Briefing_{got['edition_date']}.pdf").write_bytes(b"%PDF-1.4\n")
+            elif "too early" in got["skip_reason"]:
+                early.append(hour)
+            else:
+                published.append(hour)
+
+    chances = len(slots) - len(early)
+    for desc, passed in [
+        (f"{label}: exactly one fire produces the edition (at {ran[0]:02d}:{slots[0][1]:02d}Z)"
+         if ran else f"{label}: exactly one fire produces the edition",
+         len(ran) == 1),
+        (f"{label}: every later fire stops on 'already published' "
+         f"({len(published)} of them)", len(published) == chances - 1),
+        (f"{label}: at least {MIN_CHANCES} usable chances (got {chances})",
+         chances >= MIN_CHANCES),
+    ]:
+        failures += not passed
+        print(f"{'PASS' if passed else 'FAIL'}  {desc}")
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

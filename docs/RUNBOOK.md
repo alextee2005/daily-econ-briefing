@@ -2,29 +2,58 @@
 
 ## What runs, and when
 
-`.github/workflows/briefing.yml` fires twice every weekday, at **00:00 and
-01:00 UTC**. `scripts/gate.py` lets exactly one through, so that the run always
-sits at **20:00 America/New_York** — about four hours after the US close:
+`.github/workflows/briefing.yml` fires **five times every weekday**, at `:17`
+past 00:00 to 04:00 UTC. They are retries, not a schedule. `scripts/gate.py`
+lets exactly one through — the first fire past **20:00 America/New_York**,
+about four hours after the US close — and every later fire that day stops on
+`already published`:
 
 | | UTC fire | Bangkok | New York | outcome |
 |---|---|---|---|---|
 | Mar–Oct (EDT) | 00:17 | 07:17 | 20:17 | **runs** |
 | | 01:17 | 08:17 | 21:17 | skips — already published |
+| | 02:17 | 09:17 | 22:17 | skips — already published |
+| | 03:17 | 10:17 | 23:17 | skips — already published |
+| | 04:17 | 11:17 | 00:17 | skips — too early |
 | Nov–Mar (EST) | 00:17 | 07:17 | 19:17 | skips — too early |
 | | 01:17 | 08:17 | 20:17 | **runs** |
+| | 02:17 | 09:17 | 21:17 | skips — already published |
+| | 03:17 | 10:17 | 22:17 | skips — already published |
+| | 04:17 | 11:17 | 23:17 | skips — already published |
+
+Four usable chances in each half of the year. The set spans five hours because
+the ET cutoff slides with US daylight saving: summer uses the first four,
+winter the last four.
 
 **GitHub's scheduler is genuinely unreliable, not just slightly late.** The
 first scheduled run of this workflow fired **2h 43m** after its cron time, from
 `0 0 * * 1-5`. Midnight UTC on the hour is the most contended minute there is —
 it is the default everyone picks, and queued scheduled jobs are low-priority.
-Hence `:17`.
+Hence `:17`. The **second** scheduled run was dropped entirely: no runner, no
+logs, no record that anything was due. That is why there are now five entries
+rather than two — `:17` helps with lateness and does nothing at all for a fire
+that never happens.
+
+Two entries looked like redundancy and were not. In EST the 00:17 fire is
+19:17 ET and always too early, so winter had exactly **one** usable fire and no
+second chance. If you ever trim this list, `scripts/test_gate.py` fails: it
+reads the cron entries out of the workflow and asserts at least four usable
+chances in both DST regimes.
+
+Each fire is independent on purpose. Chaining them — retry only if the previous
+one ran — would put back the single point of failure, because the thing being
+defended against is a fire that never happens at all. What cancels the rest of
+the day is committed state: today's edition exists, so the gate stops. No
+dropped fire can disturb that, and a wasted fire costs about **20 seconds** of
+runner time (measured: 21s, `pip install` included) and nothing in money on a
+public repo.
 
 Even so, treat the delivery time as a hope rather than a guarantee: plan for
-**07:20 GMT+7 at best and an hour or two later on a bad morning**. The gate
-accepts any fire from 20:00 ET onward, so a late run still produces a correct
-edition with an honest cutoff — it is the arrival time that slips, not the
-content. A dropped run is self-healing: the next day's gate widens the window
-and covers both sessions.
+**07:20 GMT+7 at best, and 09:17 or 10:17 on a morning where the early fires
+are dropped**. The gate accepts any fire from 20:00 ET onward, so a late run
+still produces a correct edition with an honest cutoff — it is the arrival time
+that slips, not the content. A wholly missed day is self-healing: the next
+day's gate widens the window and covers both sessions.
 
 If a hard delivery time ever matters more than simplicity, the cron has to go
 and be replaced by an external scheduler calling `workflow_dispatch`. Nothing
