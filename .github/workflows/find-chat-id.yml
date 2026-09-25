@@ -1,25 +1,84 @@
 name: Find my Telegram chat ID
 
-# Run this once, by hand, to discover your chat ID without pasting your bot
-# token into a browser URL. Steps:
-#   1. Open Telegram and send your bot any message (e.g. /start).
-#   2. Actions tab -> "Find my Telegram chat ID" -> Run workflow.
-#   3. Read the chat ID off the run log, then save it as the
-#      TELEGRAM_CHAT_ID repository secret.
+# Two jobs in one workflow, because they are the same conversation:
+#
+#   1. First-time setup — discover your OWN chat ID without pasting your bot
+#      token into a browser URL. Send the bot a message, run this, read the id
+#      off the log, save it as the TELEGRAM_CHAT_ID secret. The owner's id
+#      lives in that secret and is never committed.
+#
+#   2. Ongoing — enrol other people. Anyone who messages the bot is recorded in
+#      subscribers.json as *pending*, which entitles them to nothing. Re-run
+#      with their id in the `approve` input and they start receiving the daily
+#      briefing with the next edition.
+#
+# Approval is deliberately a separate step. Anyone who finds the bot can
+# message it, so an automatic list would mean strangers receiving the briefing
+# and spending the Telegram send quota. Discovery is automatic; consent is not.
+#
+# You do not need this workflow to handle /start and /stop — briefing.yml does
+# that itself every weekday, before it sends. This is where you *approve* what
+# a /start asked for, and where you can remove someone by hand.
+#
+# Note that subscribers.json is committed, so approved chat IDs are public in
+# this repository. Display names are printed in the run log to help you decide
+# who is who, but are never stored — and on a public repository, run logs are
+# public too.
 
 on:
   workflow_dispatch:
+    inputs:
+      approve:
+        description: "Chat IDs to start sending the briefing to (comma separated)"
+        required: false
+        default: ""
+      remove:
+        description: "Chat IDs to stop sending to, or to discard from pending"
+        required: false
+        default: ""
 
 permissions:
-  contents: read
+  contents: write # record newly-seen chats in subscribers.json
+
+concurrency:
+  group: telegram-subscribers
+  cancel-in-progress: false
 
 jobs:
   lookup:
     runs-on: ubuntu-latest
     steps:
-      - name: Query getUpdates
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply approvals and removals
+        if: inputs.approve != '' || inputs.remove != ''
+        env:
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Removals first, so a mistyped id can be corrected in the same run.
+          if [ -n "${{ inputs.remove }}" ]; then
+            python3 scripts/subscribers.py remove "${{ inputs.remove }}"
+          fi
+          if [ -n "${{ inputs.approve }}" ]; then
+            python3 scripts/subscribers.py approve "${{ inputs.approve }}" \
+              --replies /tmp/approved.json
+            # Tell each newly approved chat, here rather than on the next
+            # briefing run: they have been waiting on a person, and the answer
+            # should not wait on a cron as well. Only real transitions are in
+            # the file, so re-approving someone does not message them again.
+            bash scripts/send_replies.sh /tmp/approved.json
+          fi
+
+      - name: Look for chats that have messaged the bot
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
 
@@ -28,39 +87,91 @@ jobs:
             exit 1
           fi
 
-          curl -sS "https://api.telegram.org/bot${TOKEN}/getUpdates" -o /tmp/upd.json
+          curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+            "https://api.telegram.org/bot${TOKEN}/getUpdates" -o /tmp/upd.json
 
-          python3 <<'PY'
-          import json
-
+          # Check Telegram accepted the call before trusting the payload, and
+          # print only its description — never the raw body, which echoes back
+          # chat metadata and message text into a public log.
+          python3 - <<'PY'
+          import json, sys
           d = json.load(open('/tmp/upd.json'))
-
           if not d.get('ok'):
-              print('Telegram rejected the request:', d.get('description'))
+              print('::error::Telegram rejected the request:', d.get('description', '?'))
               print('The bot token is probably wrong or has been revoked.')
-              raise SystemExit(1)
-
-          results = d.get('result', [])
-          if not results:
-              print('No updates returned.')
-              print('Send your bot a message in Telegram (e.g. /start), then re-run this workflow.')
-              print('Note: getUpdates only returns the last 24 hours of messages.')
-              raise SystemExit(1)
-
-          seen = {}
-          for u in results:
-              msg = u.get('message') or u.get('channel_post') or {}
-              chat = msg.get('chat') or {}
-              cid = chat.get('id')
-              if cid is not None and cid not in seen:
-                  seen[cid] = chat.get('type', '?')
-
-          print()
-          print('=' * 52)
-          for cid, ctype in seen.items():
-              print(f'  chat_id: {cid}   (type: {ctype})')
-          print('=' * 52)
-          print()
-          print('Save the value above as the TELEGRAM_CHAT_ID repository secret.')
-          print('For a private chat with yourself, pick the "private" one.')
+              sys.exit(1)
+          if not d.get('result'):
+              print('No updates returned. Send the bot a message (e.g. /start),')
+              print('then re-run this workflow. getUpdates only keeps 24 hours.')
           PY
+
+          python3 scripts/subscribers.py sync --updates /tmp/upd.json
+
+      - name: Record any new chats
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- subscribers.json; then
+            echo "subscribers.json unchanged — nothing to commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git add -- subscribers.json
+          git commit -m "Update briefing subscribers" \
+            -m "Recorded from a Find my Telegram chat ID run."
+
+          # The briefing pipeline pushes to main several times a week, so this
+          # may well be behind by the time it runs.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Show the current delivery list
+        if: always()
+        env:
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+
+          # always(), so a run that failed earlier still says what the list looks
+          # like. "Did my approval actually land?" is the question this page
+          # exists to answer, and a failed run is exactly when it is asked.
+          COUNT=$(python3 scripts/subscribers.py recipients 2>/dev/null | wc -l)
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+          p = pathlib.Path("subscribers.json")
+          d = json.loads(p.read_text()) if p.is_file() else {}
+          owner = (os.environ.get("OWNER_CHAT_ID") or "").strip()
+
+          def row(key, label):
+              n = len(d.get(key) or [])
+              who = ", ".join(f"`{e['chat_id']}`" for e in (d.get(key) or [])) or "—"
+              return f"| {label} | {n} | {who} |"
+
+          print("## Briefing delivery list\n")
+          print(f"**{1 if owner else 0} owner + {len(d.get('approved') or [])} "
+                "subscriber(s)** will receive the next edition.\n")
+          print("| list | count | chats |")
+          print("|---|---|---|")
+          print(row("approved", "receiving it"))
+          print(row("pending", "awaiting approval"))
+          print(row("unsubscribed", "opted out"))
+          print()
+          if not owner:
+              print("> `TELEGRAM_CHAT_ID` is **not set**, so the owner receives nothing. "
+                    "Only the subscribers above are sent to.\n")
+          else:
+              print("The owner's chat ID comes from the `TELEGRAM_CHAT_ID` secret and is "
+                    "deliberately not listed here.\n")
+          if d.get("pending"):
+              print("To enrol someone, re-run this workflow with their id in the "
+                    "`approve` input — or reply `/approve <id>` to the bot, which the "
+                    "next briefing run applies.")
+          PY
+          echo "Recipients for the next edition: ${COUNT}"

@@ -87,7 +87,166 @@ step**, so a bad run cannot produce a strange commit.
 Note that a push made with `GITHUB_TOKEN` does **not** fire another workflow's
 `push` trigger. That is why the last step invokes `deliver.yml` explicitly
 through the `workflow_dispatch` input it already exposes, rather than relying on
-the push. `deliver.yml` is otherwise untouched.
+the push.
+
+## Who receives it
+
+Two places, on purpose:
+
+| recipient | stored in | visibility |
+|---|---|---|
+| the owner | `TELEGRAM_CHAT_ID` secret | private |
+| everyone else | `subscribers.json`, `approved` list | **public — this repo is public** |
+
+`deliver.yml` sends to the owner first, then to every approved subscriber. It
+uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
+twenty recipients cost one upload rather than twenty.
+
+**Adding someone.** They send the bot `/start`. Every weekday, *before* it
+delivers, `briefing.yml` reads `getUpdates` and records them under `pending`,
+which entitles them to nothing, and replies telling them so. The same sweep
+messages **you** with their name and id, so you can decide without opening
+GitHub.
+
+Two ways to enrol them, and they do the same thing:
+
+| | how | applied |
+|---|---|---|
+| From Telegram | reply `/approve <id>` to the bot | next briefing run |
+| From GitHub | **Actions → Find my Telegram chat ID**, `approve` input | immediately |
+
+The owner's commands, honoured **only** from the owner's own chat:
+
+| command | effect |
+|---|---|
+| `/approve <id> [<id>…]` | enrol; the subscriber is told they are approved |
+| `/deny <id> [<id>…]` | drop the request; the subscriber is told nothing |
+| `/pending` | the waiting ids, and how to act on them |
+| `/status` | how many are approved, waiting and opted out |
+
+Authorisation is the sender's chat id, and that is sound rather than lazy:
+Telegram asserts the id in the payload, a sender cannot set it, and the owner's
+id comes from a repository secret no message can influence. A command from
+anyone else changes nothing and is logged as a warning — someone probing for an
+admin interface is worth seeing.
+
+`/deny` is silent on purpose. "You were refused" helps nobody, and denial is
+also how obvious spam gets cleared.
+
+Because `getUpdates` returns everything unconfirmed in its window, a `/start`
+and your `/approve` that both arrive before the next sweep are resolved in one
+pass, and the subscriber is told only the outcome rather than "pending" followed
+seconds later by "approved".
+
+Approval is a separate step deliberately. Anyone who finds the bot can message
+it, so enrolling automatically would mean strangers receiving the briefing and
+spending the Telegram send quota. **Discovery is automatic; consent is not.**
+If you would rather `/start` enrol people directly, it is one line in
+`process()` — but that is the decision it reverses.
+
+**Leaving needs nobody's permission.** A `/stop` (or `/unsubscribe`) is acted on
+in that same pre-delivery sweep, so a chat that opts out in the morning is gone
+from that morning's edition. They are also remembered in an `unsubscribed` list,
+because their messages sit in Telegram's backlog for 24 hours and would
+otherwise re-propose them as a candidate the next day. `/start` later puts them
+back in `pending` — returning still needs approval. An `approve` overrides a
+remembered opt-out, since that is the owner saying so explicitly.
+
+The sweep lives inside `briefing.yml` rather than in a workflow of its own
+because **the Routines that dispatch it every weekday are the schedule**. There
+is no separate poller and no webhook to run.
+
+Two limits worth knowing:
+
+- **`getUpdates` only retains 24 hours.** A `/stop` sent on Friday evening is
+  gone before Monday's sweep, so weekend opt-outs can be missed. The instant,
+  guaranteed opt-out remains blocking the bot — Telegram then refuses delivery
+  outright, whatever the list says.
+- The sweep runs **after** verification, so a run whose PDF failed processes no
+  commands and sends no confirmations. Nothing is delivered on such a run
+  either, so a missed `/stop` costs the sender nothing that day.
+
+A failed sweep never fails the briefing: an unreachable Telegram, a rejected
+token or a garbage response each log a warning and the edition goes out.
+
+### What the bot says
+
+All five messages are in `MSG` at the top of `scripts/subscribers.py`, and
+`scripts/send_replies.sh` delivers them for both workflows so the two cannot
+drift apart.
+
+| trigger | reply | sent by |
+|---|---|---|
+| `/start` | "Your request for subscription is pending." | `briefing.yml` sweep |
+| owner approves | "Your request for subscription has been approved." | `find-chat-id.yml` |
+| `/stop` | "We have received your unsubscribe request. Please give us time to process it." | `briefing.yml` sweep |
+| `/start` when already subscribed | "You are already subscribed…" | `briefing.yml` sweep |
+| owner sends `/stop` | explains their copy comes from the secret | `briefing.yml` sweep |
+
+Only a real state change is announced. Re-running `approve` on somebody already
+approved messages nobody, so the owner can re-run the workflow freely.
+
+**These replies are not instant, and that is the one thing to understand about
+them.** There is no webhook; the bot only "hears" anything when the weekday
+sweep polls `getUpdates`. Someone who sends `/start` at 3pm is answered the next
+morning — up to about 24 hours later, and longer across a weekend. The approval
+message is the exception: it goes out the moment the owner runs the workflow,
+because they have already been waiting on a person and should not wait on a cron
+as well.
+
+Making the `/start` reply genuinely immediate needs a webhook, which needs a
+public HTTPS endpoint this design deliberately does not have. Note also that
+**setting a webhook disables `getUpdates`** — Telegram allows one or the other,
+so adopting one would replace this sweep rather than supplement it.
+
+Only numeric chat IDs and a chat type are ever committed — never names or
+usernames. The workflow prints display names in its log so you can tell who is
+asking to be added, and on a public repository **run logs are public too**, so
+that is the one place a subscriber's name is briefly exposed. If that matters,
+make the repo private; nothing else in the pipeline depends on it being public
+except free Actions minutes.
+
+**A subscriber who blocks the bot** fails every morning with
+`403 Forbidden: bot was blocked by the user`. That is a warning, not a failure —
+one dead subscriber must not stop the briefing reaching everyone else. The job
+summary names them; drop them with the `remove` input. A failure delivering to
+the *owner* does fail the job, because that means the setup itself is broken.
+
+### Diagnosing the subscription path
+
+Every run writes what it did to the job summary, because a subscription that
+silently did not happen looks exactly like a run that succeeded.
+
+**On a briefing run,** under *Subscriptions*: how many updates arrived and from
+how many chats, each chat classified (`new`, `pending`, `approved`,
+`unsubscribed`, `owner`), every owner command with its effect, arguments that
+were not chat ids, owner-only commands attempted by other chats, and the three
+list sizes **before and after** with a marker on the ones that moved. Then
+*Bot confirmations*: each message, and for a failure Telegram's own reason.
+
+**On a delivery run,** under *Telegram delivery*: a row per recipient with its
+role (owner or subscriber), whether the PDF was uploaded or a `file_id` reused,
+and the result — including HTTP status and Telegram's description on a failure.
+Every recipient is listed, not only the failures, because a plausible-looking
+"delivered" with the wrong recipient count is the fault that would otherwise go
+unnoticed.
+
+**On Find my Telegram chat ID:** the whole list, by category, with the chats in
+each. It runs on `always()`, so a run that failed earlier still answers the
+question it is usually opened to answer — did my approval land?
+
+Things worth knowing when reading these:
+
+- **`ok: false` with HTTP 200 is a real Telegram response**, and both send paths
+  check it. Trusting the status code alone would report a message as sent when
+  the recipient never got it.
+- **Messages are base64-encoded between the script and the send loop.** The
+  owner's `/pending` answer and the new-request notice are multi-line; an
+  earlier tab-separated version treated each line as its own record and tried to
+  send a message to a chat id of `Pending ids: 555, 777, 888`.
+- A confirmation failing never fails the run. `scripts/send_replies.sh` exits 0
+  unconditionally — a confirmation that does not arrive is a nuisance, a briefing
+  that does not arrive because of one is a fault.
 
 ## Verification gate
 
@@ -222,6 +381,7 @@ Locally, three suites — the workflow runs all three before spending anything:
 python3 scripts/test_gate.py        # schedule: DST, holidays, gaps, cron delay
 python3 scripts/test_verify.py      # spec validation, incl. the edition log
 python3 scripts/test_run_report.py  # stage detection on real failure shapes
+python3 scripts/test_subscribers.py # who receives it, and who must not
 ```
 
 ## Cost
