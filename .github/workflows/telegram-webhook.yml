@@ -1,0 +1,163 @@
+name: Telegram webhook (point / check / unpoint)
+
+# Connects the bot to the Cloudflare Worker, and disconnects it again, without
+# you ever pasting the bot token into a browser.
+#
+# setWebhook is an HTTP call, and the obvious way to make one without a terminal
+# is to type the URL into the address bar — which writes the bot token into your
+# browser history, autocomplete and sync. That is the same reason
+# find-chat-id.yml exists. Here the token is already a repository secret, so this
+# workflow makes the call and never prints it.
+#
+# Actions tab -> this workflow -> Run workflow, then pick:
+#
+#   check    what Telegram currently thinks (safe, changes nothing) — start here
+#   point    send updates to the Worker. Needs worker_url.
+#   unpoint  go back to polling.
+#
+# A webhook and getUpdates are MUTUALLY EXCLUSIVE. Pointing at the Worker stops
+# polling working, and unpointing starts it again — so the TELEGRAM_DRAIN_URL
+# secret must be added when you point and removed when you unpoint, or the bot
+# hears nothing at all. Every run below says which of the two applies.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        options: [check, point, unpoint]
+        default: check
+      worker_url:
+        description: "Worker URL, e.g. https://econ-briefing-bot.you.workers.dev (for 'point')"
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  webhook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ inputs.action }}
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Must be the same string as the Worker's WEBHOOK_SECRET. Telegram
+          # echoes it back on every delivery, and the Worker refuses anything
+          # that does not match — it is the only thing stopping a stranger from
+          # POSTing "the owner approved chat X" to your Worker.
+          HOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          WORKER: ${{ inputs.worker_url }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN is not set."
+            exit 1
+          fi
+
+          api() {
+            # $1 = method, $2 = JSON body (or empty). Never echoes the token.
+            local method="$1" body="${2:-}"
+            if [ -n "$body" ]; then
+              curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                -X POST "https://api.telegram.org/bot${TOKEN}/${method}" \
+                -H 'content-type: application/json' -d "$body" -o /tmp/tg.json
+            else
+              curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                "https://api.telegram.org/bot${TOKEN}/${method}" -o /tmp/tg.json
+            fi
+          }
+
+          show() {
+            python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open('/tmp/tg.json'))
+          except Exception as exc:
+              print(f"::error::Telegram's reply was not readable: {exc}")
+              raise SystemExit(1)
+          if not d.get('ok'):
+              print(f"::error::Telegram said no: {d.get('description', '?')}")
+              raise SystemExit(1)
+          r = d.get('result')
+          if isinstance(r, dict):
+              # None of these fields carry the bot token, so printing them into a
+              # public log is safe. The secret_token is never echoed by Telegram.
+              url = r.get('url') or ''
+              print(f"  webhook url     : {url or '(none - the bot is polled)'}")
+              print(f"  pending updates : {r.get('pending_update_count', 0)}")
+              if r.get('allowed_updates'):
+                  print(f"  allowed updates : {', '.join(r['allowed_updates'])}")
+              if r.get('last_error_message'):
+                  # This is the field that explains a silent bot: a wrong secret
+                  # shows up here as 403, a bad URL as a connection error.
+                  print(f"::warning::Telegram's last delivery attempt failed: "
+                        f"{r['last_error_message']}")
+          else:
+              print(f"  result: {r}")
+          PY
+          }
+
+          case "$ACTION" in
+            check)
+              api getWebhookInfo && show || exit 1
+              echo
+              echo "A url above means Telegram is pushing to the Worker and getUpdates is"
+              echo "disabled. Empty means the bot is polled by subscriptions.yml instead."
+              ;;
+
+            point)
+              if [ -z "${WORKER:-}" ]; then
+                echo "::error::worker_url is required for 'point'."
+                echo "::error::It looks like https://econ-briefing-bot.<you>.workers.dev"
+                exit 1
+              fi
+              if [ -z "${HOOK_SECRET:-}" ]; then
+                echo "::error::TELEGRAM_WEBHOOK_SECRET is not set as a repository secret."
+                echo "::error::Set it to the same value as the Worker's WEBHOOK_SECRET."
+                echo "::error::Without it the Worker would reject every delivery."
+                exit 1
+              fi
+              # Telegram restricts secret_token to A-Z a-z 0-9 _ - (1-256 chars).
+              # A rejected token here is a confusing failure later, so check now.
+              if ! printf '%s' "$HOOK_SECRET" | grep -qE '^[A-Za-z0-9_-]{16,256}$'; then
+                echo "::error::TELEGRAM_WEBHOOK_SECRET must be 16-256 characters of"
+                echo "::error::letters, digits, underscore or hyphen only. Telegram"
+                echo "::error::rejects anything else."
+                exit 1
+              fi
+
+              URL="${WORKER%/}/telegram"
+              echo "Pointing Telegram at ${URL}"
+              api setWebhook "$(jq -nc \
+                --arg u "$URL" --arg s "$HOOK_SECRET" \
+                '{url:$u, secret_token:$s,
+                  allowed_updates:["message","callback_query"],
+                  drop_pending_updates:false}')" && show || exit 1
+
+              echo
+              api getWebhookInfo && show || true
+              echo
+              echo "::notice::Now add the repository secret TELEGRAM_DRAIN_URL = ${WORKER%/}"
+              echo "::notice::(and TELEGRAM_DRAIN_SECRET = the Worker's DRAIN_SECRET)."
+              echo "Until TELEGRAM_DRAIN_URL exists, subscriptions.yml keeps trying to poll"
+              echo "— which now returns nothing, because the webhook has taken over. People"
+              echo "will still get instant replies from the Worker; the committed list just"
+              echo "will not move until you add it."
+              ;;
+
+            unpoint)
+              echo "Disconnecting the webhook; polling will resume."
+              # drop_pending_updates:false keeps anything Telegram is holding, so
+              # a /stop sent during the switch is not thrown away.
+              api deleteWebhook '{"drop_pending_updates":false}' && show || exit 1
+              echo
+              api getWebhookInfo && show || true
+              echo
+              echo "::notice::Now DELETE the repository secret TELEGRAM_DRAIN_URL."
+              echo "While it exists, subscriptions.yml drains a Worker that Telegram is no"
+              echo "longer feeding, so nothing would be processed at all."
+              ;;
+          esac
