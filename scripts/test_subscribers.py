@@ -14,7 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import subscribers  # noqa: E402
 from subscribers import (  # noqa: E402
-    approve, chats_from_updates, ids, load, parse_ids, recipients, remove, save, sync,
+    approve, chats_from_updates, commands_from_updates, ids, load, parse_ids, process,
+    recipients, remove, save, sync,
 )
 
 OWNER = 111111111
@@ -29,8 +30,16 @@ def updates(*chats):
     ]}
 
 
+def says(*pairs):
+    """A getUpdates payload of (chat_id, text) messages, in order."""
+    return {"ok": True, "result": [
+        {"message": {"chat": {"id": c, "type": "private", "first_name": "X"}, "text": t}}
+        for c, t in pairs
+    ]}
+
+
 def fresh():
-    return {"approved": [], "pending": []}
+    return {"approved": [], "pending": [], "unsubscribed": []}
 
 
 failures = 0
@@ -125,8 +134,7 @@ with tempfile.TemporaryDirectory() as td:
 
 # A missing file is the first-run case, not an error.
 with tempfile.TemporaryDirectory() as td:
-    expect("a missing store reads as empty",
-           load(Path(td) / "nope.json"), {"approved": [], "pending": []})
+    expect("a missing store reads as empty", load(Path(td) / "nope.json"), fresh())
 
 # --- the owner's id comes from the environment, and may be absent -------------
 expect("owner id parses from the environment",
@@ -148,6 +156,100 @@ expect("edited messages and channel posts are seen too",
 expect("an update with no chat is ignored rather than crashing",
        chats_from_updates({"result": [{"poll_answer": {"poll_id": "x"}}]}), [])
 expect("an empty payload yields nothing", chats_from_updates({}), [])
+
+# --- /start and /stop ----------------------------------------------------------
+# These run in briefing.yml before the edition is sent, so whatever a chat asked
+# for this morning must be true of this morning's delivery.
+
+expect("commands are recognised with and without a @botname suffix",
+       sorted(c["command"] for c in commands_from_updates(
+           says((1, "/stop@EconBriefBot"), (2, "/start")))),
+       ["start", "stop"])
+expect("/subscribe and /unsubscribe are accepted too",
+       sorted(c["command"] for c in commands_from_updates(
+           says((1, "/unsubscribe"), (2, "/subscribe")))),
+       ["start", "stop"])
+expect("ordinary chatter is not a command",
+       commands_from_updates(says((1, "morning, thanks for the briefing"))), [])
+
+# An approved subscriber who says stop must be gone from THIS morning's send.
+d, _ = sync(updates((FRIEND, "private", "Sam")), fresh(), OWNER)
+approve({FRIEND}, d, OWNER)
+d, _, replies = process(says((FRIEND, "/stop")), d, OWNER)
+expect("/stop drops an approved subscriber from today's delivery",
+       recipients(d, OWNER), [OWNER])
+expect("/stop is confirmed back to the sender",
+       [r["outcome"] for r in replies], ["stopped"])
+
+# The /stop message stays in Telegram's backlog for 24 hours, so the next run
+# sees it again. It must not put them back up for approval.
+d, report = sync(says((FRIEND, "/stop")), d, OWNER)
+expect("a stale /stop does not re-propose the chat",
+       (ids(d["pending"]), [r["state"] for r in report]), (set(), ["unsubscribed"]))
+
+# /start asks to be considered. It must NOT enrol — that was a deliberate choice.
+d2, _, replies2 = process(says((STRANGER, "/start")), fresh(), OWNER)
+expect("/start does not enrol, it only asks",
+       (recipients(d2, OWNER), ids(d2["pending"])), ([OWNER], {STRANGER}))
+expect("/start is answered with 'awaiting approval'",
+       [r["outcome"] for r in replies2], ["pending"])
+
+# Changing your mind inside one window: the later command wins.
+d3, _, _ = process(says((FRIEND, "/stop"), (FRIEND, "/start")), fresh(), OWNER)
+expect("/start after /stop in one window leaves them pending, not opted out",
+       (ids(d3["pending"]), ids(d3["unsubscribed"])), ({FRIEND}, set()))
+d4, _, _ = process(says((FRIEND, "/start"), (FRIEND, "/stop")), fresh(), OWNER)
+expect("/stop after /start in one window leaves them opted out",
+       (ids(d4["pending"]), ids(d4["unsubscribed"])), (set(), {FRIEND}))
+
+# An explicit approval must beat a remembered opt-out, or the two would fight.
+d5, _, _ = process(says((FRIEND, "/stop")), fresh(), OWNER)
+approve({FRIEND}, d5, OWNER)
+expect("approving clears an earlier opt-out",
+       (ids(d5["unsubscribed"]), FRIEND in ids(d5["approved"])), (set(), False))
+
+# A re-joining chat still needs approval, not an automatic return.
+d6, _, _ = process(says((FRIEND, "/stop")), fresh(), OWNER)
+d6, _, _ = process(says((FRIEND, "/start")), d6, OWNER)
+expect("/start after an opt-out returns them to pending, not to the send list",
+       (recipients(d6, OWNER), ids(d6["pending"])), ([OWNER], {FRIEND}))
+
+# Already-subscribed chats get told so rather than being duplicated.
+d7, _ = sync(updates((FRIEND, "private", "Sam")), fresh(), OWNER)
+approve({FRIEND}, d7, OWNER)
+d7, _, replies7 = process(says((FRIEND, "/start")), d7, OWNER)
+expect("/start from an existing subscriber changes nothing",
+       (recipients(d7, OWNER), [r["outcome"] for r in replies7]),
+       ([OWNER, FRIEND], ["already-subscribed"]))
+
+# The owner cannot unsubscribe by message — their copy is a repository secret.
+# Pretending to comply would be the worst outcome here.
+d8, _, replies8 = process(says((OWNER, "/stop")), fresh(), OWNER)
+expect("the owner's /stop is refused honestly, not silently obeyed",
+       (recipients(d8, OWNER), [r["outcome"] for r in replies8]),
+       ([OWNER], ["owner-stop"]))
+
+# A /stop from someone never on the list is still confirmed.
+d9, _, replies9 = process(says((STRANGER, "/stop")), fresh(), OWNER)
+expect("/stop from an unknown chat is still acknowledged",
+       [r["outcome"] for r in replies9], ["stopped"])
+
+# The owner's own `remove` must stick, not be undone by tomorrow's sweep.
+d10, _ = sync(updates((FRIEND, "private", "Sam")), fresh(), OWNER)
+remove({FRIEND}, d10, remember=True)
+d10, _ = sync(updates((FRIEND, "private", "Sam")), d10, OWNER)
+expect("a manual removal is not undone by the next sweep", ids(d10["pending"]), set())
+
+# Opting out never leaks a name either.
+with tempfile.TemporaryDirectory() as td:
+    p = Path(td) / "s.json"
+    d11, _, _ = process({"ok": True, "result": [{"message": {
+        "chat": {"id": FRIEND, "type": "private", "first_name": "Sam",
+                 "username": "samsmith"}, "text": "/stop"}}]}, fresh(), OWNER)
+    save(d11, p)
+    body = p.read_text()
+    expect("the unsubscribed list carries no name or username",
+           ("Sam" in body, "samsmith" in body), (False, False))
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

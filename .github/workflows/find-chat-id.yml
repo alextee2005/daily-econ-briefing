@@ -16,6 +16,10 @@ name: Find my Telegram chat ID
 # message it, so an automatic list would mean strangers receiving the briefing
 # and spending the Telegram send quota. Discovery is automatic; consent is not.
 #
+# You do not need this workflow to handle /start and /stop — briefing.yml does
+# that itself every weekday, before it sends. This is where you *approve* what
+# a /start asked for, and where you can remove someone by hand.
+#
 # Note that subscribers.json is committed, so approved chat IDs are public in
 # this repository. Display names are printed in the run log to help you decide
 # who is who, but are never stored — and on a public repository, run logs are

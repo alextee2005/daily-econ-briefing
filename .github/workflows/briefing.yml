@@ -232,6 +232,72 @@ jobs:
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           [ "$CODE" = "1" ] && exit 1 || exit 0
 
+      - name: Process subscribe and unsubscribe requests
+        # Runs here, between verification and delivery, so that whatever a chat
+        # asked for this morning is true of this morning's edition: a /stop is
+        # honoured before the send, and a /start is on the pending list before
+        # the owner next looks.
+        #
+        # There is no separate poller and no webhook. The Routines that dispatch
+        # this workflow every weekday are the schedule, which is the whole
+        # reason this lives here rather than in a workflow of its own — GitHub's
+        # own cron cannot be relied on to fire at all.
+        #
+        # Deliberately after "Verify the output": that step exits 1 on a bad
+        # PDF, so a failed edition processes no commands and sends nobody a
+        # confirmation. Nothing is delivered on such a run either, so an
+        # unprocessed /stop costs the sender nothing.
+        if: steps.gate.outputs.should_run == 'true' && !inputs.dry_run
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "TELEGRAM_BOT_TOKEN is not set; skipping subscription handling."
+            exit 0
+          fi
+
+          # Never fail the briefing over this. A missed opt-out is recoverable
+          # on the next run; a briefing lost because Telegram was unreachable
+          # is not.
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 "https://api.telegram.org/bot${TOKEN}/getUpdates" -o /tmp/upd.json; then
+            echo "::warning::Could not reach Telegram to check for /start and /stop."
+            exit 0
+          fi
+
+          # No offset is sent, so updates are never confirmed and stay readable
+          # by the other workflow for their full 24 hours. Two readers using
+          # offsets would consume each other's updates.
+          # stderr is discarded because a 502 HTML body raises a traceback that
+          # says nothing the warning below does not, and these logs are public.
+          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('/tmp/upd.json')).get('ok') else 1)" 2>/dev/null; then
+            echo "::warning::Telegram rejected getUpdates; skipping subscription handling."
+            exit 0
+          fi
+
+          python3 scripts/subscribers.py process \
+            --updates /tmp/upd.json --replies /tmp/replies.json || exit 0
+
+          # Confirm to each sender. A silent /stop is worse than none, because
+          # the person believes they have left and has no way to check.
+          python3 - <<'PY' > /tmp/replies.tsv
+          import json
+          for r in json.load(open('/tmp/replies.json')):
+              print(f"{r['chat_id']}\t{r['text']}")
+          PY
+
+          while IFS=$'\t' read -r CID TEXT; do
+            [ -n "${CID:-}" ] || continue
+            curl -sS -o /dev/null --retry 2 --retry-delay 3 --retry-all-errors \
+              -F "chat_id=${CID}" -F "text=${TEXT}" \
+              "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+              && echo "  replied to ${CID}" \
+              || echo "::warning::Could not confirm to ${CID}."
+          done < /tmp/replies.tsv
+
       - name: Upload build for inspection
         if: always() && steps.gate.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
@@ -262,6 +328,11 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git add -- "${{ steps.gate.outputs.pdf_path }}"
+
+          # Whatever the subscription step changed rides along in this commit,
+          # so the morning produces one push rather than two racing ones. A
+          # no-op if nothing changed.
+          git add -- subscribers.json
 
           if [ "${{ steps.verify.outputs.code }}" = "2" ]; then
             # Spec rejected: ship the briefing, keep the previous spec current.

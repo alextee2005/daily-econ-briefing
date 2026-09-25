@@ -102,15 +102,42 @@ Two places, on purpose:
 uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
 twenty recipients cost one upload rather than twenty.
 
-**Adding someone.** They message the bot, then run **Actions → Find my Telegram
-chat ID**. Every chat that has messaged the bot is listed; ones we have not seen
-before are recorded in `subscribers.json` under `pending`, which entitles them
-to nothing. Re-run the workflow with their id in the `approve` input and they
-receive the next edition. The `remove` input takes them back off.
+**Adding someone.** They send the bot `/start`. Every weekday, *before* it
+delivers, `briefing.yml` reads `getUpdates` and records them under `pending`,
+which entitles them to nothing, and replies telling them so. To enrol them, run
+**Actions → Find my Telegram chat ID** with their id in the `approve` input;
+they receive the next edition. The `remove` input takes them back off.
 
 Approval is a separate step deliberately. Anyone who finds the bot can message
 it, so enrolling automatically would mean strangers receiving the briefing and
 spending the Telegram send quota. **Discovery is automatic; consent is not.**
+If you would rather `/start` enrol people directly, it is one line in
+`process()` — but that is the decision it reverses.
+
+**Leaving needs nobody's permission.** A `/stop` (or `/unsubscribe`) is acted on
+in that same pre-delivery sweep, so a chat that opts out in the morning is gone
+from that morning's edition. They are also remembered in an `unsubscribed` list,
+because their messages sit in Telegram's backlog for 24 hours and would
+otherwise re-propose them as a candidate the next day. `/start` later puts them
+back in `pending` — returning still needs approval. An `approve` overrides a
+remembered opt-out, since that is the owner saying so explicitly.
+
+The sweep lives inside `briefing.yml` rather than in a workflow of its own
+because **the Routines that dispatch it every weekday are the schedule**. There
+is no separate poller and no webhook to run.
+
+Two limits worth knowing:
+
+- **`getUpdates` only retains 24 hours.** A `/stop` sent on Friday evening is
+  gone before Monday's sweep, so weekend opt-outs can be missed. The instant,
+  guaranteed opt-out remains blocking the bot — Telegram then refuses delivery
+  outright, whatever the list says.
+- The sweep runs **after** verification, so a run whose PDF failed processes no
+  commands and sends no confirmations. Nothing is delivered on such a run
+  either, so a missed `/stop` costs the sender nothing that day.
+
+A failed sweep never fails the briefing: an unreachable Telegram, a rejected
+token or a garbage response each log a warning and the edition goes out.
 
 Only numeric chat IDs and a chat type are ever committed — never names or
 usernames. The workflow prints display names in its log so you can tell who is
