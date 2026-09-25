@@ -53,6 +53,19 @@ COMMANDS = {
     "/stop": "stop", "/unsubscribe": "stop",
 }
 
+# Everything the bot ever says, in one place, because these are the only part of
+# the system a subscriber sees. Kept deliberately plain: they are read by people
+# who did not ask for an explanation of how the pipeline works.
+MSG = {
+    "pending": "Your request for subscription is pending.",
+    "approved": "Your request for subscription has been approved.",
+    "stopped": ("We have received your unsubscribe request. "
+                "Please give us time to process it."),
+    "already-subscribed": "You are already subscribed. Send /stop to unsubscribe.",
+    "owner-stop": ("You are the owner of this briefing. Your own copy is configured "
+                   "in the repository, not by this bot, so it will keep arriving."),
+}
+
 
 def norm(data: dict) -> dict:
     """Fill in any list a hand-edit or an older file is missing."""
@@ -88,6 +101,11 @@ def save(data: dict, path: Path = STORE) -> None:
 
 def ids(entries: list) -> set:
     return {e["chat_id"] for e in entries}
+
+
+def reply(chat_id: int, outcome: str) -> dict:
+    """One message for the send step: who, why, and what to say."""
+    return {"chat_id": chat_id, "outcome": outcome, "text": MSG[outcome]}
 
 
 def owner_id() -> int | None:
@@ -193,10 +211,7 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
             # The owner's copy comes from a repository secret, which no message
             # can change. Say so rather than appearing to comply.
             if verb == "stop":
-                replies.append({"chat_id": cid, "outcome": "owner-stop", "text":
-                                "You are the owner of this briefing. Your own copy is "
-                                "configured in the repository, not by this bot, so it "
-                                "will keep arriving."})
+                replies.append(reply(cid, "owner-stop"))
             continue
 
         if verb == "stop":
@@ -208,32 +223,31 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
             # Always confirm, even to a chat that was never on the list. Someone
             # who sends /stop wants to know it worked, and "you were not
             # subscribed anyway" is not reassurance they can act on.
-            replies.append({"chat_id": cid, "outcome": "stopped", "text":
-                            "You have been unsubscribed and will not receive further "
-                            "editions of the Daily Economic Briefing. Send /start if "
-                            "you would like to be considered again."})
+            replies.append(reply(cid, "stopped"))
         else:
             data["unsubscribed"] = [e for e in data["unsubscribed"] if e["chat_id"] != cid]
             if cid in ids(data["approved"]):
-                replies.append({"chat_id": cid, "outcome": "already-subscribed", "text":
-                                "You are already subscribed to the Daily Economic "
-                                "Briefing. Send /stop at any time to unsubscribe."})
+                replies.append(reply(cid, "already-subscribed"))
             else:
                 if cid not in ids(data["pending"]):
                     data["pending"].append(
                         {"chat_id": cid, "type": req["type"],
                          "seen": date.today().isoformat()}
                     )
-                replies.append({"chat_id": cid, "outcome": "pending", "text":
-                                "Thanks — your request has been recorded. The briefing is "
-                                "sent to an approved list, so you will start receiving it "
-                                "once the owner confirms. Send /stop to withdraw."})
+                replies.append(reply(cid, "pending"))
 
     return data, report, replies
 
 
-def approve(targets: set, data: dict, owner: int | None) -> list:
-    """Move chats from pending to approved. Returns one note per target."""
+def approve(targets: set, data: dict, owner: int | None,
+            replies: list | None = None) -> list:
+    """Move chats from pending to approved. Returns one note per target.
+
+    Pass `replies` to collect the "approved" confirmation for each chat that
+    actually changed state, so the caller can tell them. Only a real transition
+    produces one — re-approving someone already on the list must not message
+    them again every time the owner runs the workflow.
+    """
     norm(data)
     notes = []
     pending = {e["chat_id"]: e for e in data["pending"]}
@@ -255,6 +269,8 @@ def approve(targets: set, data: dict, owner: int | None) -> list:
             )
             data["pending"] = [e for e in data["pending"] if e["chat_id"] != cid]
             notes.append((cid, "approved — will receive the next edition"))
+            if replies is not None:
+                replies.append(reply(cid, "approved"))
         else:
             # Approving a chat the bot has never heard from cannot work:
             # Telegram refuses sendDocument until the user starts the bot.
@@ -386,10 +402,13 @@ def main() -> int:
     if not args.targets:
         raise SystemExit(f"{args.action} needs at least one chat id")
     targets = parse_ids(args.targets)
+    acted = []
     if args.action == "approve":
-        notes = approve(targets, data, owner)
+        notes = approve(targets, data, owner, replies=acted)
     else:
         notes = remove(targets, data, remember=True)
+    if args.replies:
+        Path(args.replies).write_text(json.dumps(acted), encoding="utf-8")
     save(data, store)
     print()
     for cid, note in notes:

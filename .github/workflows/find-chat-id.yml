@@ -58,13 +58,21 @@ jobs:
         if: inputs.approve != '' || inputs.remove != ''
         env:
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           set -euo pipefail
+          # Removals first, so a mistyped id can be corrected in the same run.
           if [ -n "${{ inputs.remove }}" ]; then
             python3 scripts/subscribers.py remove "${{ inputs.remove }}"
           fi
           if [ -n "${{ inputs.approve }}" ]; then
-            python3 scripts/subscribers.py approve "${{ inputs.approve }}"
+            python3 scripts/subscribers.py approve "${{ inputs.approve }}" \
+              --replies /tmp/approved.json
+            # Tell each newly approved chat, here rather than on the next
+            # briefing run: they have been waiting on a person, and the answer
+            # should not wait on a cron as well. Only real transitions are in
+            # the file, so re-approving someone does not message them again.
+            bash scripts/send_replies.sh /tmp/approved.json
           fi
 
       - name: Look for chats that have messaged the bot

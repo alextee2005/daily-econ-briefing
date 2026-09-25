@@ -139,6 +139,36 @@ Two limits worth knowing:
 A failed sweep never fails the briefing: an unreachable Telegram, a rejected
 token or a garbage response each log a warning and the edition goes out.
 
+### What the bot says
+
+All five messages are in `MSG` at the top of `scripts/subscribers.py`, and
+`scripts/send_replies.sh` delivers them for both workflows so the two cannot
+drift apart.
+
+| trigger | reply | sent by |
+|---|---|---|
+| `/start` | "Your request for subscription is pending." | `briefing.yml` sweep |
+| owner approves | "Your request for subscription has been approved." | `find-chat-id.yml` |
+| `/stop` | "We have received your unsubscribe request. Please give us time to process it." | `briefing.yml` sweep |
+| `/start` when already subscribed | "You are already subscribed…" | `briefing.yml` sweep |
+| owner sends `/stop` | explains their copy comes from the secret | `briefing.yml` sweep |
+
+Only a real state change is announced. Re-running `approve` on somebody already
+approved messages nobody, so the owner can re-run the workflow freely.
+
+**These replies are not instant, and that is the one thing to understand about
+them.** There is no webhook; the bot only "hears" anything when the weekday
+sweep polls `getUpdates`. Someone who sends `/start` at 3pm is answered the next
+morning — up to about 24 hours later, and longer across a weekend. The approval
+message is the exception: it goes out the moment the owner runs the workflow,
+because they have already been waiting on a person and should not wait on a cron
+as well.
+
+Making the `/start` reply genuinely immediate needs a webhook, which needs a
+public HTTPS endpoint this design deliberately does not have. Note also that
+**setting a webhook disables `getUpdates`** — Telegram allows one or the other,
+so adopting one would replace this sweep rather than supplement it.
+
 Only numeric chat IDs and a chat type are ever committed — never names or
 usernames. The workflow prints display names in its log so you can tell who is
 asking to be added, and on a public repository **run logs are public too**, so

@@ -251,5 +251,53 @@ with tempfile.TemporaryDirectory() as td:
     expect("the unsubscribed list carries no name or username",
            ("Sam" in body, "samsmith" in body), (False, False))
 
+# --- what the subscriber actually reads ----------------------------------------
+# These are the only part of the system a subscriber sees, and the wording is the
+# owner's, so pin it rather than leaving it to be paraphrased by a later edit.
+from subscribers import MSG  # noqa: E402
+
+expect("/start is answered with the pending wording",
+       MSG["pending"], "Your request for subscription is pending.")
+expect("approval is answered with the approved wording",
+       MSG["approved"], "Your request for subscription has been approved.")
+expect("/stop is answered with the unsubscribe wording",
+       MSG["stopped"],
+       "We have received your unsubscribe request. Please give us time to process it.")
+expect("every outcome the code can produce has a message",
+       sorted(MSG), ["already-subscribed", "approved", "owner-stop", "pending", "stopped"])
+
+# Approval must notify, and must notify only on a real transition — the owner
+# re-running the workflow should not message a subscriber again each time.
+d12, _, _ = process(says((FRIEND, "/start")), fresh(), OWNER)
+told = []
+approve({FRIEND}, d12, OWNER, replies=told)
+expect("approving tells the subscriber, once",
+       [(r["chat_id"], r["outcome"], r["text"]) for r in told],
+       [(FRIEND, "approved", MSG["approved"])])
+
+told2 = []
+approve({FRIEND}, d12, OWNER, replies=told2)
+expect("re-approving does not message them again", told2, [])
+
+# Approving a chat that never asked cannot be confirmed either.
+d13 = fresh()
+told3 = []
+approve({STRANGER}, d13, OWNER, replies=told3)
+expect("approving an unseen chat sends no confirmation", told3, [])
+
+# The owner is not a subscriber, so approving them confirms nothing.
+d14, _ = sync(updates((OWNER, "private", "Alex")), fresh(), OWNER)
+told4 = []
+approve({OWNER}, d14, OWNER, replies=told4)
+expect("approving the owner sends no confirmation", told4, [])
+
+# Every reply the daily sweep emits must carry text, or the send step would
+# push an empty message to a real person.
+d15, _, allreplies = process(
+    says((FRIEND, "/start"), (STRANGER, "/stop"), (OWNER, "/stop")), fresh(), OWNER)
+expect("every emitted reply has a chat, an outcome and non-empty text",
+       all(r.get("chat_id") and r.get("outcome") and r.get("text") for r in allreplies)
+       and len(allreplies), 3)
+
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

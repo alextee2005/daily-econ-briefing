@@ -283,20 +283,7 @@ jobs:
 
           # Confirm to each sender. A silent /stop is worse than none, because
           # the person believes they have left and has no way to check.
-          python3 - <<'PY' > /tmp/replies.tsv
-          import json
-          for r in json.load(open('/tmp/replies.json')):
-              print(f"{r['chat_id']}\t{r['text']}")
-          PY
-
-          while IFS=$'\t' read -r CID TEXT; do
-            [ -n "${CID:-}" ] || continue
-            curl -sS -o /dev/null --retry 2 --retry-delay 3 --retry-all-errors \
-              -F "chat_id=${CID}" -F "text=${TEXT}" \
-              "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-              && echo "  replied to ${CID}" \
-              || echo "::warning::Could not confirm to ${CID}."
-          done < /tmp/replies.tsv
+          TELEGRAM_BOT_TOKEN="$TOKEN" bash scripts/send_replies.sh /tmp/replies.json
 
       - name: Upload build for inspection
         if: always() && steps.gate.outputs.should_run == 'true'
