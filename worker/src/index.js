@@ -50,6 +50,12 @@ const MSG = {
 const START = new Set(["/start", "/subscribe"]);
 const STOP = new Set(["/stop", "/unsubscribe"]);
 
+// Bumped by hand whenever this file changes in a way worth confirming is live.
+// The Worker runs from code pasted into the dashboard, not from this repository,
+// so "did my paste actually deploy?" is otherwise unanswerable — and a stale
+// deploy looks exactly like a configuration fault.
+const VERSION = "2026-09-25c";
+
 async function tg(env, method, body) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -276,6 +282,8 @@ export default {
 
       return Response.json({
         ok: missing.length === 0 && untrimmed.length === 0 && queueError === null,
+        version: VERSION,
+        at: new Date().toISOString(),
         queued,
         config,
         ...(missing.length ? { missing } : {}),
@@ -283,6 +291,12 @@ export default {
           ? { whitespace: untrimmed, hint: "these have leading or trailing whitespace" }
           : {}),
         ...(queueError ? { queueError } : {}),
+      }, {
+        // A diagnostic that can be served from a cache is worse than none: it
+        // reports a state that may be minutes old and looks indistinguishable
+        // from the live one. `at` above is the second check — if it does not
+        // move between reloads, something is caching regardless.
+        headers: { "cache-control": "no-store, max-age=0" },
       });
     }
 

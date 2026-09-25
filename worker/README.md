@@ -158,6 +158,14 @@ one fault you cannot see from anywhere else:
 | `"queueError":…` | the `QUEUE` binding is absent, misnamed, or you did not deploy after adding it |
 | `"queued":null` | same as above |
 | an error page, not JSON | the code did not deploy, or the URL is wrong |
+| no `version` field at all | you are running older code — the paste in step 3 did not deploy |
+| `at` identical across two reloads | something is caching the reply; add `?x=1` to the URL |
+
+The `version` field is the answer to "is my paste actually live?". The Worker runs
+from code pasted into the dashboard, not from this repository, so a stale deploy
+looks exactly like a configuration fault. If `version` is missing or older than
+the `VERSION` constant at the top of `src/index.js`, fix that before reading
+anything else on the page.
 
 Do not go further until this is clean. Every later failure looks like a bare
 `403` and tells you nothing.
