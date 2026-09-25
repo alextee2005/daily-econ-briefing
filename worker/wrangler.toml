@@ -1,0 +1,23 @@
+# Cloudflare Worker that receives Telegram's webhook. See README.md to deploy.
+name = "econ-briefing-bot"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# The durable queue. Create it once with:
+#   npx wrangler kv namespace create QUEUE
+# then paste the id it prints here.
+[[kv_namespaces]]
+binding = "QUEUE"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# Public raw URL of the committed subscriber list. The repository is public, so
+# the Worker needs no credential to read it — that is what keeps the Worker free
+# of any GitHub access at all.
+LIST_URL = "https://raw.githubusercontent.com/alextee2005/daily-econ-briefing/main/subscribers.json"
+
+# Secrets are NOT set here. Set them with `npx wrangler secret put <NAME>`:
+#   BOT_TOKEN       the Telegram bot token
+#   OWNER_CHAT_ID   your own chat id
+#   WEBHOOK_SECRET  any long random string, also given to setWebhook
+#   DRAIN_SECRET    any long random string, also stored as a GitHub secret

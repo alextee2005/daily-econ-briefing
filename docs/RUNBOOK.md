@@ -102,17 +102,16 @@ Two places, on purpose:
 uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
 twenty recipients cost one upload rather than twenty.
 
-**Adding someone.** They send the bot `/start`. Every weekday, *before* it
-delivers, `briefing.yml` reads `getUpdates` and records them under `pending`,
-which entitles them to nothing, and replies telling them so. The same sweep
-messages **you** with their name and id, so you can decide without opening
-GitHub.
+**Adding someone.** They send the bot `/start`. `subscriptions.yml` polls the
+bot **every five minutes**, records them under `pending` — which entitles them to
+nothing — replies telling them so, and messages **you** with their name and id so
+you can decide without opening GitHub.
 
 Two ways to enrol them, and they do the same thing:
 
 | | how | applied |
 |---|---|---|
-| From Telegram | reply `/approve <id>` to the bot | next briefing run |
+| From Telegram | reply `/approve <id>` to the bot | within ~5 minutes |
 | From GitHub | **Actions → Find my Telegram chat ID**, `approve` input | immediately |
 
 The owner's commands, honoured **only** from the owner's own chat:
@@ -133,10 +132,9 @@ admin interface is worth seeing.
 `/deny` is silent on purpose. "You were refused" helps nobody, and denial is
 also how obvious spam gets cleared.
 
-Because `getUpdates` returns everything unconfirmed in its window, a `/start`
-and your `/approve` that both arrive before the next sweep are resolved in one
-pass, and the subscriber is told only the outcome rather than "pending" followed
-seconds later by "approved".
+A `/start` and your `/approve` that both land before the next poll are resolved
+in one pass, and the subscriber is told only the outcome rather than "pending"
+followed seconds later by "approved".
 
 Approval is a separate step deliberately. Anyone who finds the bot can message
 it, so enrolling automatically would mean strangers receiving the briefing and
@@ -145,29 +143,83 @@ If you would rather `/start` enrol people directly, it is one line in
 `process()` — but that is the decision it reverses.
 
 **Leaving needs nobody's permission.** A `/stop` (or `/unsubscribe`) is acted on
-in that same pre-delivery sweep, so a chat that opts out in the morning is gone
-from that morning's edition. They are also remembered in an `unsubscribed` list,
-because their messages sit in Telegram's backlog for 24 hours and would
-otherwise re-propose them as a candidate the next day. `/start` later puts them
-back in `pending` — returning still needs approval. An `approve` overrides a
-remembered opt-out, since that is the owner saying so explicitly.
+within about five minutes. They are also remembered in an `unsubscribed` list, so
+a message still sitting in Telegram's backlog cannot re-propose them as a
+candidate. `/start` later puts them back in `pending` — returning still needs
+approval. An `approve` overrides a remembered opt-out, since that is the owner
+saying so explicitly.
 
-The sweep lives inside `briefing.yml` rather than in a workflow of its own
-because **the Routines that dispatch it every weekday are the schedule**. There
-is no separate poller and no webhook to run.
+### Why the poller is its own workflow
 
-Two limits worth knowing:
+This started as a step inside `briefing.yml`, which was wrong in two ways that
+only showed up in use:
 
-- **`getUpdates` only retains 24 hours.** A `/stop` sent on Friday evening is
-  gone before Monday's sweep, so weekend opt-outs can be missed. The instant,
-  guaranteed opt-out remains blocking the bot — Telegram then refuses delivery
-  outright, whatever the list says.
-- The sweep runs **after** verification, so a run whose PDF failed processes no
-  commands and sends no confirmations. Nothing is delivered on such a run
-  either, so a missed `/stop` costs the sender nothing that day.
+- It ran **at most once a weekday**, so "auto-response" meant a reply the next
+  morning — and a message sent on a Friday afternoon was **lost**, because
+  Telegram keeps updates for 24 hours and the next sweep was 66 hours away.
+- It was gated on the edition being due, so any fire that found the edition
+  already published skipped it entirely. There was no cheap way to process a
+  message at all: a manual run either skipped the sweep or regenerated a whole
+  briefing.
 
-A failed sweep never fails the briefing: an unreachable Telegram, a rejected
-token or a garbage response each log a warning and the edition goes out.
+So it polls on **GitHub's** cron, not a Claude Routine. GitHub's scheduler is
+unreliable, which is fatal for producing an edition and harmless here — a dropped
+poll delays a reply by a few minutes rather than losing a briefing. It also costs
+no model tokens, where a Routine at this cadence would cost roughly $0.43 a time.
+
+`briefing.yml` no longer touches `subscribers.json` at all. One writer means the
+`telegram-subscribers` concurrency group is enough to prevent races, and
+`deliver.yml` simply reads whatever the list says when it checks out — at most a
+few minutes stale.
+
+### Exactly once
+
+Two different mechanisms, depending on the path.
+
+**Under the webhook**, queue keys are derived from Telegram's `update_id`, which
+is monotonic per bot. That makes enqueueing idempotent — a delivery Telegram
+retries rewrites the same key rather than adding a second item — and makes a
+lexical sort of the queue true chronological order. Ordering matters because the
+last decision in a batch wins: an earlier version keyed on `Date.now()` plus a
+random suffix, so two decisions in the same millisecond sorted randomly and a
+`/stop` could be applied before the `/start` it followed, leaving somebody
+subscribed after asking to leave.
+
+The queue is **at-least-once**: items are handed out on read and deleted only
+after the workflow has committed, so `apply_queue()` is written to be idempotent
+and every case is tested applied twice. Acknowledging on read would instead lose
+an opt-out silently.
+
+`apply_queue()` sends nothing. The Worker already answered the sender at the
+time; messaging them again days later because a drain replayed would be worse
+than saying nothing.
+
+**Under polling**, every message must be acted on once, or a five-minute poller
+reading a 24-hour backlog would answer the same `/start` about 288 times a day.
+Two independent guards:
+
+1. The poll asks Telegram for `offset = last_update_id + 1`, so confirmed
+   updates are not served again.
+2. `process()` ignores any update whose id is at or below `last_update_id`, even
+   if Telegram serves it anyway.
+
+Both are needed: an offset that fails to stick, a retry, or a second reader
+would otherwise replay the backlog. An update arriving with **no** usable id is
+processed rather than dropped — a duplicate confirmation is a nuisance, an
+opt-out that vanished means messaging someone who asked you to stop.
+
+If the poll sends its replies but then cannot push, `last_update_id` is not
+saved and the next poll will answer those messages again. That is the deliberate
+choice: confirming to Telegram before the commit would instead lose the opt-out
+silently.
+
+The remaining limit: `getUpdates` still only retains 24 hours, so if the poller
+is down for a whole day, messages in that window are gone. The instant,
+guaranteed opt-out remains blocking the bot — Telegram then refuses delivery
+outright, whatever the list says.
+
+A failed poll never fails anything else: an unreachable Telegram, a rejected
+token or a garbage response each log a warning and exit 0.
 
 ### What the bot says
 
@@ -177,27 +229,33 @@ drift apart.
 
 | trigger | reply | sent by |
 |---|---|---|
-| `/start` | "Your request for subscription is pending." | `briefing.yml` sweep |
+| `/start` | "Your request for subscription is pending." | `subscriptions.yml` poll |
 | owner approves | "Your request for subscription has been approved." | `find-chat-id.yml` |
-| `/stop` | "We have received your unsubscribe request. Please give us time to process it." | `briefing.yml` sweep |
-| `/start` when already subscribed | "You are already subscribed…" | `briefing.yml` sweep |
-| owner sends `/stop` | explains their copy comes from the secret | `briefing.yml` sweep |
+| `/stop` | "We have received your unsubscribe request. Please give us time to process it." | `subscriptions.yml` poll |
+| `/start` when already subscribed | "You are already subscribed…" | `subscriptions.yml` poll |
+| owner sends `/stop` | explains their copy comes from the secret | `subscriptions.yml` poll |
 
 Only a real state change is announced. Re-running `approve` on somebody already
 approved messages nobody, so the owner can re-run the workflow freely.
 
-**These replies are not instant, and that is the one thing to understand about
-them.** There is no webhook; the bot only "hears" anything when the weekday
-sweep polls `getUpdates`. Someone who sends `/start` at 3pm is answered the next
-morning — up to about 24 hours later, and longer across a weekend. The approval
-message is the exception: it goes out the moment the owner runs the workflow,
-because they have already been waiting on a person and should not wait on a cron
-as well.
+**How fast a reply arrives depends on whether the Worker is deployed.**
 
-Making the `/start` reply genuinely immediate needs a webhook, which needs a
-public HTTPS endpoint this design deliberately does not have. Note also that
-**setting a webhook disables `getUpdates`** — Telegram allows one or the other,
-so adopting one would replace this sweep rather than supplement it.
+| | webhook (`worker/`) | polling only |
+|---|---|---|
+| `/start`, `/stop` answered | milliseconds | next poll, 5–15 min |
+| owner notified of a request | milliseconds, with Approve/Deny buttons | next poll |
+| Approve → subscriber told | milliseconds | immediately, if approved from the GitHub workflow |
+| `subscribers.json` caught up | ≤ 5 min | same poll |
+
+`worker/README.md` has the one-time deploy. The switch is the
+`TELEGRAM_DRAIN_URL` secret: present means drain the Worker's queue, absent means
+poll. **Setting a Telegram webhook disables `getUpdates`** — they are mutually
+exclusive — which is why this is a switch and not an addition, and why undoing it
+means deleting both the webhook and the secret.
+
+Under the webhook there is one narrow lag that matters: a subscriber approved
+seconds before an edition is generated may miss that one edition, because
+delivery reads the committed list. They get the next one.
 
 Only numeric chat IDs and a chat type are ever committed — never names or
 usernames. The workflow prints display names in its log so you can tell who is
@@ -217,7 +275,7 @@ the *owner* does fail the job, because that means the setup itself is broken.
 Every run writes what it did to the job summary, because a subscription that
 silently did not happen looks exactly like a run that succeeded.
 
-**On a briefing run,** under *Subscriptions*: how many updates arrived and from
+**On a poll** (`subscriptions.yml`), under *Subscriptions*: how many updates arrived and from
 how many chats, each chat classified (`new`, `pending`, `approved`,
 `unsubscribed`, `owner`), every owner command with its effect, arguments that
 were not chat ids, owner-only commands attempted by other chats, and the three
@@ -382,6 +440,7 @@ python3 scripts/test_gate.py        # schedule: DST, holidays, gaps, cron delay
 python3 scripts/test_verify.py      # spec validation, incl. the edition log
 python3 scripts/test_run_report.py  # stage detection on real failure shapes
 python3 scripts/test_subscribers.py # who receives it, and who must not
+node    worker/test.mjs             # the instant replies and the queue
 ```
 
 ## Cost
