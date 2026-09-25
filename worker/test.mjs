@@ -302,6 +302,16 @@ const queued = async (env) => {
       DRAIN_SECRET: true, LIST_URL: true, QUEUE: true });
   expect("health never echoes a secret value",
     JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
+  // A cached diagnostic reports a state that may be minutes old and is
+  // indistinguishable from the live one — worse than having no diagnostic.
+  expect("health forbids caching",
+    h.headers.get("cache-control"), "no-store, max-age=0");
+  // The Worker runs from code pasted into a dashboard, so "is my paste live?"
+  // has to be answerable from the response itself.
+  expect("health reports which code is running",
+    typeof body.version === "string" && body.version.length > 0, true);
+  expect("health timestamps itself so a frozen reply is visible",
+    typeof body.at === "string" && body.at.endsWith("Z"), true);
 }
 {
   // The exact failure we hit: the secret named something else, so env.X is
