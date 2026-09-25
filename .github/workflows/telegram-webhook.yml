@@ -93,8 +93,23 @@ jobs:
               if r.get('last_error_message'):
                   # This is the field that explains a silent bot: a wrong secret
                   # shows up here as 403, a bad URL as a connection error.
-                  print(f"::warning::Telegram's last delivery attempt failed: "
-                        f"{r['last_error_message']}")
+                  #
+                  # The DATE matters as much as the message. Telegram keeps the
+                  # last error indefinitely and never clears it on success, so
+                  # without a timestamp a long-fixed fault is indistinguishable
+                  # from a live one — which cost a round of debugging exactly
+                  # once. Age it explicitly.
+                  import datetime as _dt
+                  when = r.get('last_error_date')
+                  age = ''
+                  if when:
+                      secs = int(_dt.datetime.now(_dt.timezone.utc).timestamp() - when)
+                      age = f" ({secs // 60}m {secs % 60}s ago)"
+                  print(f"::warning::Telegram's last delivery attempt failed"
+                        f"{age}: {r['last_error_message']}")
+                  if when and (_dt.datetime.now(_dt.timezone.utc).timestamp() - when) > 300:
+                      print("  That error is more than five minutes old. If deliveries are")
+                      print("  working now, Telegram simply never clears this field.")
           else:
               print(f"  result: {r}")
           PY
