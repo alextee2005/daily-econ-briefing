@@ -285,13 +285,55 @@ const queued = async (env) => {
     [["approve", FRIEND], ["approve", STRANGER]]);
 }
 
-// --- health -------------------------------------------------------------------
+// --- health, which has to explain a 403 nobody can see from outside -----------
+// Telegram reports a rejected delivery only as "Wrong response from the webhook:
+// 403 Forbidden". A missing secret and a wrong secret look identical from there,
+// so /health has to distinguish them — reporting presence, never values.
 {
   const env = harness();
   await hook(env, msg(FRIEND, "/start"));
   const h = await worker.fetch(new Request("https://w.test/health"), env);
-  expect("health reports queue depth without a secret",
-    await h.json(), { ok: true, queued: 1 });
+  const body = await h.json();
+  expect("health reports queue depth and a clean config",
+    [body.ok, body.queued, body.missing], [true, 1, undefined]);
+  expect("health confirms each binding is present",
+    body.config,
+    { BOT_TOKEN: true, OWNER_CHAT_ID: true, WEBHOOK_SECRET: true,
+      DRAIN_SECRET: true, LIST_URL: true, QUEUE: true });
+  expect("health never echoes a secret value",
+    JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
+}
+{
+  // The exact failure we hit: the secret named something else, so env.X is
+  // undefined and every delivery is refused.
+  const env = harness();
+  delete env.WEBHOOK_SECRET;
+  const h = await worker.fetch(new Request("https://w.test/health"), env);
+  const body = await h.json();
+  expect("health names a missing secret instead of just failing",
+    [body.ok, body.missing], [false, ["WEBHOOK_SECRET"]]);
+
+  const r = await hook(env, msg(FRIEND, "/start"), "anything");
+  expect("and the webhook refuses every delivery while it is missing",
+    [r.status, sent.length], [403, 0]);
+}
+{
+  // A value pasted into a dashboard field with a trailing newline: equally
+  // invisible, equally fatal, and not caught by a presence check alone.
+  const env = harness();
+  env.WEBHOOK_SECRET = "hook\n";
+  const h = await worker.fetch(new Request("https://w.test/health"), env);
+  const body = await h.json();
+  expect("health flags trailing whitespace in a secret",
+    [body.ok, body.whitespace], [false, ["WEBHOOK_SECRET"]]);
+}
+{
+  // A broken or unbound KV namespace must be reported, not thrown.
+  const env = harness();
+  env.QUEUE = { list: async () => { throw new Error("no such namespace"); } };
+  const body = await (await worker.fetch(new Request("https://w.test/health"), env)).json();
+  expect("health reports a broken queue binding",
+    [body.ok, body.queued, body.queueError], [false, null, "no such namespace"]);
 }
 
 // --- ordinary chatter is not a command ----------------------------------------

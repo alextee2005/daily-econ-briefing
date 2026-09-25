@@ -248,14 +248,65 @@ export default {
     const auth = (name) => url.searchParams.get("secret") === env[name];
 
     if (url.pathname === "/health") {
-      const { keys } = await env.QUEUE.list({ prefix: "q:", limit: 1000 });
-      return Response.json({ ok: true, queued: keys.length });
+      // Reports which bindings EXIST, never their values, because the failure
+      // this has to explain is invisible from outside: a missing or misnamed
+      // secret makes env.X undefined, the header comparison below fails for
+      // every request, and Telegram reports a bare "403 Forbidden" that looks
+      // identical to a wrong value. Booleans are enough to tell those apart and
+      // leak nothing.
+      const config = {};
+      for (const name of ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
+                          "DRAIN_SECRET", "LIST_URL", "QUEUE"]) {
+        config[name] = Boolean(env[name]);
+      }
+      const missing = Object.entries(config).filter(([, v]) => !v).map(([k]) => k);
+
+      // A value pasted into a dashboard field very easily carries a trailing
+      // newline or space, which is equally invisible and equally fatal.
+      const untrimmed = ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET", "DRAIN_SECRET"]
+        .filter((n) => typeof env[n] === "string" && env[n] !== env[n].trim());
+
+      let queued = null;
+      let queueError = null;
+      try {
+        queued = (await env.QUEUE.list({ prefix: "q:", limit: 1000 })).keys.length;
+      } catch (e) {
+        queueError = String((e && e.message) || e);
+      }
+
+      return Response.json({
+        ok: missing.length === 0 && untrimmed.length === 0 && queueError === null,
+        queued,
+        config,
+        ...(missing.length ? { missing } : {}),
+        ...(untrimmed.length
+          ? { whitespace: untrimmed, hint: "these have leading or trailing whitespace" }
+          : {}),
+        ...(queueError ? { queueError } : {}),
+      });
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       // Telegram echoes the secret set with setWebhook. Without this check the
       // endpoint is an open relay for forged subscription changes.
-      if (request.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) {
+      const presented = request.headers.get("x-telegram-bot-api-secret-token");
+      if (presented !== env.WEBHOOK_SECRET) {
+        // Telegram surfaces this only as "Wrong response from the webhook: 403
+        // Forbidden", which says nothing about why. Name the cause in the
+        // Worker's own log (Logs tab, or `wrangler tail`) without printing
+        // either secret.
+        console.warn(
+          "rejected a delivery:",
+          !env.WEBHOOK_SECRET
+            ? "WEBHOOK_SECRET is not set on this Worker — check the variable is " +
+              "named exactly WEBHOOK_SECRET, and that you deployed after adding it"
+            : !presented
+              ? "the request carried no secret header, so it did not come from " +
+                "Telegram's webhook — or setWebhook was called without secret_token"
+              : "the secret header did not match WEBHOOK_SECRET — the value here " +
+                "and TELEGRAM_WEBHOOK_SECRET in GitHub differ, possibly by " +
+                "trailing whitespace",
+        );
         return new Response("forbidden", { status: 403 });
       }
       let update;
