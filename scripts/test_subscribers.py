@@ -7,6 +7,7 @@ default in every ambiguous case is "receives nothing".
 """
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -502,6 +503,109 @@ with tempfile.TemporaryDirectory() as td:
     expect("the mark survives the round trip", load(p)["last_update_id"], 5)
     _, _, r32, _ = process(says_ids((5, FRIEND, "/start")), load(p), OWNER)
     expect("and still suppresses a replay after reloading", r32, [])
+
+# --- the webhook queue ----------------------------------------------------------
+# The Worker answers people in milliseconds and queues what it decided; these
+# cases cover bringing the committed list into line afterwards. The queue is
+# at-least-once — items are deleted only after this has been committed — so every
+# one of them must survive being applied twice. Deleting on read instead would
+# lose an opt-out silently, which is the failure worth engineering against.
+from subscribers import apply_queue, sizes  # noqa: E402
+
+
+def q(*triples):
+    """Queue items as the Worker writes them: (id, verb, chat_id)."""
+    return [{"id": i, "verb": v, "chat_id": c, "type": "private"} for i, v, c in triples]
+
+
+d33, notes33 = apply_queue(q(("1", "start", FRIEND)), fresh(), OWNER)
+expect("a queued /start lands in pending, not approved",
+       (ids(d33["pending"]), ids(d33["approved"])), ({FRIEND}, set()))
+
+# The property everything else depends on.
+d34, _ = apply_queue(q(("1", "start", FRIEND)), fresh(), OWNER)
+d34, notes34 = apply_queue(q(("1", "start", FRIEND)), d34, OWNER)
+expect("replaying a /start changes nothing",
+       (len(d34["pending"]), "no change" in notes34[0]), (1, True))
+
+d35, _ = apply_queue(q(("1", "start", FRIEND), ("2", "approve", FRIEND)), fresh(), OWNER)
+expect("a queued approval puts them on the delivery list",
+       recipients(d35, OWNER), [OWNER, FRIEND])
+d35, notes35 = apply_queue(q(("2", "approve", FRIEND)), d35, OWNER)
+expect("replaying an approval changes nothing",
+       (recipients(d35, OWNER), "no change" in notes35[0]), ([OWNER, FRIEND], True))
+
+d36, _ = apply_queue(q(("1", "start", FRIEND), ("2", "approve", FRIEND),
+                       ("3", "stop", FRIEND)), fresh(), OWNER)
+expect("a queued /stop removes and remembers them",
+       (recipients(d36, OWNER), ids(d36["unsubscribed"])), ([OWNER], {FRIEND}))
+d36, _ = apply_queue(q(("3", "stop", FRIEND)), d36, OWNER)
+expect("replaying a /stop keeps them off, exactly once",
+       (recipients(d36, OWNER), len(d36["unsubscribed"])), ([OWNER], 1))
+
+# Order within one drain must be honoured: the Worker queues chronologically.
+d37, _ = apply_queue(q(("1", "start", FRIEND), ("2", "stop", FRIEND),
+                       ("3", "start", FRIEND)), fresh(), OWNER)
+expect("the last decision in a batch wins",
+       (ids(d37["pending"]), ids(d37["unsubscribed"])), ({FRIEND}, set()))
+
+# Deny is a removal, and is silent — apply_queue sends nothing at all, ever.
+d38, _ = apply_queue(q(("1", "start", STRANGER), ("2", "deny", STRANGER)), fresh(), OWNER)
+expect("a queued denial removes and remembers them",
+       (ids(d38["pending"]), ids(d38["unsubscribed"])), (set(), {STRANGER}))
+
+# The Worker may queue an approval before the /start that caused it has drained —
+# they are separate writes. Honour it rather than dropping the owner's decision.
+d39, _ = apply_queue(q(("9", "approve", FRIEND)), fresh(), OWNER)
+expect("an approval with no pending row still enrols them",
+       recipients(d39, OWNER), [OWNER, FRIEND])
+
+# An approval must clear a remembered opt-out, or the two would fight.
+d40, _ = apply_queue(q(("1", "stop", FRIEND), ("2", "approve", FRIEND)), fresh(), OWNER)
+expect("a queued approval overrides an earlier opt-out",
+       (ids(d40["unsubscribed"]), FRIEND in ids(d40["approved"])), (set(), True))
+
+# The owner cannot be enrolled or removed by queue traffic.
+d41, notes41 = apply_queue(q(("1", "start", OWNER), ("2", "stop", OWNER)), fresh(), OWNER)
+expect("queue items about the owner are skipped",
+       (recipients(d41, OWNER), all("owner" in n for n in notes41)), ([OWNER], True))
+
+# Junk must not crash the drain or silently corrupt the list.
+d42, notes42 = apply_queue(
+    [{"id": "x", "verb": "explode", "chat_id": FRIEND},
+     {"id": "y", "verb": "start", "chat_id": "not-a-number"},
+     {"id": "z"}],
+    fresh(), OWNER)
+expect("unrecognised queue items are reported and ignored",
+       (sizes(d42), len(notes42)),
+       ({"approved": 0, "pending": 0, "unsubscribed": 0}, 3))
+
+# apply_queue never messages anybody: the Worker already did, at the time.
+expect("apply_queue returns notes, never replies",
+       all(isinstance(n, str) for n in notes33), True)
+
+# --- the Worker's copy of the wording must not drift --------------------------
+# The Worker answers people in milliseconds, so it cannot fetch its wording over
+# the network first; it carries its own copy. Two copies of anything drift, and
+# the drift would be invisible — the subscriber would simply be told something
+# slightly different depending on which path answered. So compare them.
+WORKER = Path(__file__).resolve().parent.parent / "worker/src/index.js"
+if WORKER.is_file():
+    js = WORKER.read_text(encoding="utf-8")
+    block = js.split("const MSG = {", 1)[1].split("\n};", 1)[0]
+    # Join the string concatenations the JS uses for line length, then read the
+    # "key": "value" pairs back out.
+    flat = re.sub(r'"\s*\+\s*\n?\s*"', "", block)
+    worker_msg = {k: v for k, v in re.findall(r'"?([a-z-]+)"?:\s*\n?\s*"((?:[^"\\]|\\.)*)"', flat)}
+
+    for key, text in MSG.items():
+        expect(f"the Worker's {key!r} wording matches",
+               worker_msg.get(key), text)
+    extra = set(worker_msg) - set(MSG) - {"denied"}
+    expect("the Worker says nothing the Python side does not know about",
+           sorted(extra), [])
+else:
+    print("SKIP  worker/src/index.js not present")
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

@@ -261,6 +261,73 @@ def sizes(data: dict) -> dict:
     return {k: len(data[k]) for k in ("approved", "pending", "unsubscribed")}
 
 
+def apply_queue(items: list, data: dict, owner: int | None) -> tuple[dict, list]:
+    """Apply decisions the webhook Worker has already answered.
+
+    The Worker replies to people in milliseconds and queues what it decided;
+    this brings the committed list into line afterwards. It therefore sends
+    nothing — the sender was told at the time, and telling them again days later
+    because a drain replayed would be worse than saying nothing.
+
+    Every item must be idempotent, because the queue is at-least-once: items are
+    handed out on read and deleted only after this has been committed, so a
+    drain that dies mid-way replays. Deleting on read would instead lose an
+    opt-out silently, which is the one outcome worth engineering against.
+
+    Returns the store and one note per item, for the run log.
+    """
+    norm(data)
+    notes = []
+    for item in items:
+        verb, cid = item.get("verb"), item.get("chat_id")
+        ctype = item.get("type", "?")
+        if not isinstance(cid, int) or verb not in ("start", "stop", "approve", "deny"):
+            notes.append(f"{item.get('id', '?')}: ignored, not a decision I understand")
+            continue
+
+        if owner is not None and cid == owner:
+            notes.append(f"{cid}: is the owner, skipped")
+            continue
+
+        if verb == "start":
+            if cid in ids(data["approved"]):
+                notes.append(f"{cid}: already approved, no change")
+            else:
+                data["unsubscribed"] = [e for e in data["unsubscribed"]
+                                        if e["chat_id"] != cid]
+                if cid in ids(data["pending"]):
+                    notes.append(f"{cid}: already pending, no change")
+                else:
+                    data["pending"].append({"chat_id": cid, "type": ctype,
+                                            "seen": date.today().isoformat()})
+                    notes.append(f"{cid}: awaiting approval")
+
+        elif verb in ("stop", "deny"):
+            was = cid in ids(data["approved"]) | ids(data["pending"])
+            remove({cid}, data)
+            if cid not in ids(data["unsubscribed"]):
+                data["unsubscribed"].append({"chat_id": cid, "type": ctype,
+                                             "stopped": date.today().isoformat()})
+            notes.append(f"{cid}: {'removed and' if was else ''} opted out".replace("  ", " "))
+
+        elif verb == "approve":
+            data["unsubscribed"] = [e for e in data["unsubscribed"] if e["chat_id"] != cid]
+            if cid in ids(data["approved"]):
+                notes.append(f"{cid}: already approved, no change")
+            else:
+                entry = next((e for e in data["pending"] if e["chat_id"] == cid), None)
+                data["pending"] = [e for e in data["pending"] if e["chat_id"] != cid]
+                # Approving a chat that never asked is still honoured here: the
+                # owner tapped Approve on a real request, and the /start that
+                # created it may simply not have been drained yet.
+                data["approved"].append({"chat_id": cid,
+                                         "type": (entry or {}).get("type", ctype),
+                                         "added": date.today().isoformat()})
+                notes.append(f"{cid}: now receiving the briefing")
+
+    return data, notes
+
+
 def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, list, dict]:
     """Record new chats, act on /start and /stop, then on the owner's commands.
 
@@ -547,7 +614,8 @@ def parse_ids(raw: str) -> set:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("action", choices=["sync", "process", "approve", "remove", "recipients"])
+    ap.add_argument("action",
+                    choices=["sync", "process", "drain", "approve", "remove", "recipients"])
     ap.add_argument("targets", nargs="?", default="", help="chat ids, comma or space separated")
     ap.add_argument("--updates", help="a getUpdates JSON payload (sync, process)")
     ap.add_argument("--replies", help="write the confirmations to send here (process)")
@@ -562,6 +630,50 @@ def main() -> int:
         # stdout is the machine-readable part: one id per line, nothing else.
         for cid in recipients(data, owner):
             print(cid)
+        return 0
+
+    if args.action == "drain":
+        # The webhook path. --updates holds the Worker's {"items": [...]} and
+        # --replies is written with the ids to acknowledge, so nothing is
+        # acknowledged that was not committed.
+        if not args.updates:
+            raise SystemExit("drain needs --updates (the queue JSON)")
+        payload = json.loads(Path(args.updates).read_text(encoding="utf-8"))
+        items = payload.get("items", payload if isinstance(payload, list) else [])
+        before = sizes(data)
+        data, notes = apply_queue(items, data, owner)
+        save(data, store)
+        if args.replies:
+            Path(args.replies).write_text(
+                json.dumps([i["id"] for i in items if "id" in i]), encoding="utf-8")
+
+        a = sizes(data)
+        print(f"\n{len(items)} queued decision(s) applied:")
+        for n in notes:
+            print(f"  {n}")
+        print(f"\nLists: approved {before['approved']}->{a['approved']}, "
+              f"pending {before['pending']}->{a['pending']}, "
+              f"opted out {before['unsubscribed']}->{a['unsubscribed']}")
+        print(f"The next edition goes to the owner plus {a['approved']} subscriber(s).")
+        if data["pending"]:
+            print("::notice::Awaiting approval: "
+                  + ", ".join(str(e["chat_id"]) for e in data["pending"]))
+
+        path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if path:
+            out = ["## Subscriptions (webhook queue)", "",
+                   f"{len(items)} decision(s) applied.", "",
+                   "| list | before | after |", "|---|---|---|"]
+            for k, label in (("approved", "receiving it"), ("pending", "awaiting approval"),
+                             ("unsubscribed", "opted out")):
+                arrow = "" if before[k] == a[k] else " ←"
+                out.append(f"| {label} | {before[k]} | **{a[k]}**{arrow} |")
+            if notes:
+                out += ["", "**What changed**", ""] + [f"- {n}" for n in notes]
+            out += ["", "Replies were sent by the Worker at the time each message "
+                    "arrived; this step only brings the committed list into line."]
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(out) + "\n")
         return 0
 
     if args.action == "process":

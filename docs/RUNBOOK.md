@@ -174,9 +174,29 @@ few minutes stale.
 
 ### Exactly once
 
-Every message must be acted on once, or a five-minute poller reading a
-24-hour backlog would answer the same `/start` about 288 times a day. Two
-independent guards:
+Two different mechanisms, depending on the path.
+
+**Under the webhook**, queue keys are derived from Telegram's `update_id`, which
+is monotonic per bot. That makes enqueueing idempotent — a delivery Telegram
+retries rewrites the same key rather than adding a second item — and makes a
+lexical sort of the queue true chronological order. Ordering matters because the
+last decision in a batch wins: an earlier version keyed on `Date.now()` plus a
+random suffix, so two decisions in the same millisecond sorted randomly and a
+`/stop` could be applied before the `/start` it followed, leaving somebody
+subscribed after asking to leave.
+
+The queue is **at-least-once**: items are handed out on read and deleted only
+after the workflow has committed, so `apply_queue()` is written to be idempotent
+and every case is tested applied twice. Acknowledging on read would instead lose
+an opt-out silently.
+
+`apply_queue()` sends nothing. The Worker already answered the sender at the
+time; messaging them again days later because a drain replayed would be worse
+than saying nothing.
+
+**Under polling**, every message must be acted on once, or a five-minute poller
+reading a 24-hour backlog would answer the same `/start` about 288 times a day.
+Two independent guards:
 
 1. The poll asks Telegram for `offset = last_update_id + 1`, so confirmed
    updates are not served again.
@@ -218,16 +238,24 @@ drift apart.
 Only a real state change is announced. Re-running `approve` on somebody already
 approved messages nobody, so the owner can re-run the workflow freely.
 
-**Replies arrive within about five minutes, not instantly.** There is no webhook;
-the bot only "hears" anything when `subscriptions.yml` polls. GitHub's cron is
-late and skips, so treat five minutes as the floor and a quarter of an hour as a
-bad case. An approval done from the GitHub workflow is the exception — it
-messages the subscriber straight away.
+**How fast a reply arrives depends on whether the Worker is deployed.**
 
-Truly instant would need a webhook, which needs a public HTTPS endpoint this
-design deliberately does not have. Note also that **setting a webhook disables
-`getUpdates`** — Telegram allows one or the other, so adopting one would replace
-this poller rather than supplement it.
+| | webhook (`worker/`) | polling only |
+|---|---|---|
+| `/start`, `/stop` answered | milliseconds | next poll, 5–15 min |
+| owner notified of a request | milliseconds, with Approve/Deny buttons | next poll |
+| Approve → subscriber told | milliseconds | immediately, if approved from the GitHub workflow |
+| `subscribers.json` caught up | ≤ 5 min | same poll |
+
+`worker/README.md` has the one-time deploy. The switch is the
+`TELEGRAM_DRAIN_URL` secret: present means drain the Worker's queue, absent means
+poll. **Setting a Telegram webhook disables `getUpdates`** — they are mutually
+exclusive — which is why this is a switch and not an addition, and why undoing it
+means deleting both the webhook and the secret.
+
+Under the webhook there is one narrow lag that matters: a subscriber approved
+seconds before an edition is generated may miss that one edition, because
+delivery reads the committed list. They get the next one.
 
 Only numeric chat IDs and a chat type are ever committed — never names or
 usernames. The workflow prints display names in its log so you can tell who is
@@ -412,6 +440,7 @@ python3 scripts/test_gate.py        # schedule: DST, holidays, gaps, cron delay
 python3 scripts/test_verify.py      # spec validation, incl. the edition log
 python3 scripts/test_run_report.py  # stage detection on real failure shapes
 python3 scripts/test_subscribers.py # who receives it, and who must not
+node    worker/test.mjs             # the instant replies and the queue
 ```
 
 ## Cost

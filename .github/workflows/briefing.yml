@@ -93,6 +93,10 @@ jobs:
           # edition being made at all, rather than stopping a good one being
           # delivered.
           python3 scripts/test_subscribers.py
+          # The Worker answers subscribers in real time and carries its own copy
+          # of the wording; test_subscribers.py compares the two so they cannot
+          # drift. Node is preinstalled on the runner.
+          node worker/test.mjs
 
       - name: Decide whether to run
         id: gate
