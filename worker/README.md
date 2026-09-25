@@ -87,7 +87,24 @@ Worker's page → **Settings**.
 
 The variable name must be exactly `QUEUE` — that is what the code looks for.
 
-**Under Variables and Secrets** → **Add**, four times:
+**Under Variables and Secrets** → **Add**, five times.
+
+⚠️ **Use *Variables and Secrets*, not *Build variables*.** The dashboard has two
+places that look equivalent and are not:
+
+| where | visible to the Worker at runtime? |
+|---|---|
+| Settings → **Variables and Secrets** | ✅ yes — the one you want |
+| Settings → **Build** → *Build variables and secrets* | ❌ no — build-time only |
+
+Adding them in the wrong place saves without any complaint and leaves every one
+of them `undefined` at runtime. The symptom is a bare `403 Forbidden` on every
+Telegram delivery, because the secret comparison can never succeed. Step 5 shows
+this as `"missing"` listing all of them while `QUEUE` stays `true` — the binding
+is configured elsewhere and is unaffected.
+
+⚠️ **Press Deploy afterwards.** The dashboard stages these changes and discards
+them if you navigate away.
 
 | Variable name | Type | Value |
 |---|---|---|
