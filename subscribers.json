@@ -1,5 +1,13 @@
 {
-  "_comment": "Recipients of the daily briefing, besides the owner. Approved chats receive it; pending chats have only messaged the bot and receive nothing. Move an id between the lists with scripts/subscribers.py, or by hand. Numeric ids only \u2014 never add names or usernames, this repository is public.",
-  "approved": [],
-  "pending": []
+  "_comment": "Recipients of the daily briefing, besides the owner. Approved chats receive it; pending chats have only messaged the bot and receive nothing; unsubscribed chats asked to stop and are remembered so a stale message cannot re-propose them. Move an id between the lists with scripts/subscribers.py, or by hand. Numeric ids only \u2014 never add names or usernames, this repository is public.",
+  "approved": [
+    {
+      "chat_id": 870201856,
+      "type": "private",
+      "added": "2026-09-25"
+    }
+  ],
+  "pending": [],
+  "unsubscribed": [],
+  "last_update_id": 0
 }
