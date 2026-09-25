@@ -23,23 +23,37 @@ FRIEND = 222222222
 STRANGER = 333333333
 
 
+# Telegram's update_id increases monotonically and forever, so the helpers mint
+# ids the same way. Reusing an id across two payloads would look to the code like
+# a replay of an already-handled message — which is exactly what it is designed
+# to ignore, and would silently hollow out most of the cases below.
+_uid = [1000]
+
+
+def next_uid():
+    _uid[0] += 1
+    return _uid[0]
+
+
 def updates(*chats):
     """A getUpdates payload for the given (id, type, first_name) chats."""
     return {"ok": True, "result": [
-        {"message": {"chat": {"id": c[0], "type": c[1], "first_name": c[2]}}} for c in chats
+        {"update_id": next_uid(),
+         "message": {"chat": {"id": c[0], "type": c[1], "first_name": c[2]}}} for c in chats
     ]}
 
 
 def says(*pairs):
     """A getUpdates payload of (chat_id, text) messages, in order."""
     return {"ok": True, "result": [
-        {"message": {"chat": {"id": c, "type": "private", "first_name": "X"}, "text": t}}
+        {"update_id": next_uid(),
+         "message": {"chat": {"id": c, "type": "private", "first_name": "X"}, "text": t}}
         for c, t in pairs
     ]}
 
 
 def fresh():
-    return {"approved": [], "pending": [], "unsubscribed": []}
+    return {"approved": [], "pending": [], "unsubscribed": [], "last_update_id": 0}
 
 
 failures = 0
@@ -243,7 +257,7 @@ expect("a manual removal is not undone by the next sweep", ids(d10["pending"]), 
 # Opting out never leaks a name either.
 with tempfile.TemporaryDirectory() as td:
     p = Path(td) / "s.json"
-    d11, _, _, _ = process({"ok": True, "result": [{"message": {
+    d11, _, _, _ = process({"ok": True, "result": [{"update_id": next_uid(), "message": {
         "chat": {"id": FRIEND, "type": "private", "first_name": "Sam",
                  "username": "samsmith"}, "text": "/stop"}}]}, fresh(), OWNER)
     save(d11, p)
@@ -354,10 +368,14 @@ expect("no owner configured means no owner commands are honoured",
 
 # /pending and /status answer the owner and change nothing.
 d21, _, _, _ = process(says((FRIEND, "/start")), fresh(), OWNER)
-snapshot = json.dumps(d21, sort_keys=True)
+# Only the lists must be untouched. last_update_id does advance — the command
+# has been handled and must not be answered again on the next poll.
+lists_only = lambda d: json.dumps({k: d[k] for k in
+                                   ("approved", "pending", "unsubscribed")}, sort_keys=True)
+snapshot = lists_only(d21)
 d21, _, r21, _ = process(says((OWNER, "/pending")), d21, OWNER)
 expect("/pending answers the owner without changing the lists",
-       (json.dumps(d21, sort_keys=True) == snapshot,
+       (lists_only(d21) == snapshot,
         [r["outcome"] for r in r21]), (True, ["owner-pending"]))
 expect("the /pending answer names the waiting chat",
        str(FRIEND) in r21[0]["text"], True)
@@ -413,6 +431,77 @@ expect("an already-pending chat does not re-notify the owner",
 d25, _, r25, _ = process(says((FRIEND, "/start")), fresh(), None)
 expect("no owner configured means no notification and no error",
        [r["outcome"] for r in r25], ["pending"])
+
+# --- exactly once, however often we poll ----------------------------------------
+# The poller runs every five minutes and Telegram keeps its backlog for 24 hours.
+# Without this, one /start would be answered on every pass — about 288 identical
+# messages a day to one person. These are the cases that make frequent polling
+# safe, and they are the reason last_update_id exists.
+
+def says_ids(*triples):
+    """A payload of (update_id, chat_id, text)."""
+    return {"ok": True, "result": [
+        {"update_id": uid,
+         "message": {"chat": {"id": c, "type": "private", "first_name": "X"}, "text": t}}
+        for uid, c, t in triples
+    ]}
+
+
+payload = says_ids((10, FRIEND, "/start"))
+d26, _, r26, diag26 = process(payload, fresh(), OWNER)
+expect("a first sighting is acted on",
+       ([r["outcome"] for r in r26 if r["chat_id"] == FRIEND], d26["last_update_id"]),
+       (["pending"], 10))
+
+# The same payload again — exactly what the next poll receives if the offset has
+# not yet taken effect.
+d26, _, r26b, diag26b = process(payload, d26, OWNER)
+expect("re-reading the same update replies to nobody", r26b, [])
+expect("and says why it did nothing",
+       (diag26b["skipped_already_handled"], diag26b["updates"]), (1, 0))
+
+# A newer update in the same payload is still acted on.
+d27, _, r27, _ = process(says_ids((10, FRIEND, "/start"), (11, STRANGER, "/start")),
+                         d26, OWNER)
+expect("a newer update alongside a handled one is acted on",
+       sorted(r["chat_id"] for r in r27 if r["chat_id"] != OWNER), [STRANGER])
+expect("the mark advances to the newest seen", d27["last_update_id"], 11)
+
+# The owner's commands must not repeat either — a /pending sitting in the backlog
+# would otherwise be answered every five minutes.
+d28, _, r28, _ = process(says_ids((20, OWNER, "/pending")), fresh(), OWNER)
+d28, _, r28b, _ = process(says_ids((20, OWNER, "/pending")), d28, OWNER)
+expect("an owner command is answered once, not on every poll",
+       ([r["outcome"] for r in r28], r28b), (["owner-pending"], []))
+
+# Nor may an approval be re-announced.
+d29, _, _, _ = process(says_ids((30, FRIEND, "/start")), fresh(), OWNER)
+d29, _, r29, _ = process(says_ids((31, OWNER, "/approve %d" % FRIEND)), d29, OWNER)
+d29, _, r29b, _ = process(says_ids((31, OWNER, "/approve %d" % FRIEND)), d29, OWNER)
+expect("an approval is announced once",
+       ([r["outcome"] for r in r29], r29b), (["approved"], []))
+expect("and the subscriber stays on the list", recipients(d29, OWNER), [OWNER, FRIEND])
+
+# An empty poll must not move the mark backwards.
+d30, _, r30, _ = process({"ok": True, "result": []}, d29, OWNER)
+expect("an empty poll changes nothing",
+       (r30, d30["last_update_id"]), ([], 31))
+
+# A store written before last_update_id existed must not replay the whole backlog
+# as brand new — it should still work, treating the mark as 0 and acting once.
+legacy = {"approved": [], "pending": []}
+d31, _, r31, _ = process(says_ids((5, FRIEND, "/start")), legacy, OWNER)
+expect("a store predating last_update_id still works",
+       ([r["outcome"] for r in r31 if r["chat_id"] == FRIEND], d31["last_update_id"]),
+       (["pending"], 5))
+
+# The mark has to survive a save/load round trip or none of the above holds.
+with tempfile.TemporaryDirectory() as td:
+    p = Path(td) / "s.json"
+    save(d31, p)
+    expect("the mark survives the round trip", load(p)["last_update_id"], 5)
+    _, _, r32, _ = process(says_ids((5, FRIEND, "/start")), load(p), OWNER)
+    expect("and still suppresses a replay after reloading", r32, [])
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

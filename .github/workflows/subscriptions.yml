@@ -1,0 +1,159 @@
+name: Answer the Telegram bot
+
+# Polls the bot every few minutes and acts on what it finds: /start, /stop, and
+# the owner's /approve, /deny, /pending, /status.
+#
+# WHY THIS IS ITS OWN WORKFLOW
+# This used to be a step inside briefing.yml, which was wrong in two ways that
+# only showed up in use.
+#
+#   1. It ran once a weekday at most, so "auto-response" meant a reply the next
+#      morning — and a message sent on a Friday afternoon was simply LOST,
+#      because Telegram keeps updates for only 24 hours and the next sweep was
+#      66 hours away.
+#   2. It was gated on the edition being due, so on any fire that found the
+#      edition already published the sweep was skipped entirely. There was no
+#      cheap way to process a message at all: a manual run either skipped the
+#      sweep or regenerated a whole briefing.
+#
+# So polling belongs on its own schedule, and that schedule belongs on GitHub's
+# cron rather than a Claude Routine. GitHub's scheduler is unreliable, which is
+# fatal for producing an edition and harmless here: a dropped poll delays a
+# reply by a few minutes instead of losing a briefing. It also costs no model
+# tokens at all, where a Routine firing this often would cost roughly $0.43 a
+# time.
+#
+# EXACTLY ONCE
+# Every message must be acted on once. The poll asks for offset =
+# last_update_id + 1, and scripts/subscribers.py independently ignores anything
+# at or below that mark. Both matter: without the offset Telegram keeps serving
+# the backlog, and without the filter a retried or duplicated poll would answer
+# the same /start again — about 288 identical messages a day at this cadence.
+
+on:
+  schedule:
+    # Every five minutes, GitHub's shortest allowed interval. Expect it to be
+    # late and to skip: what matters is that it runs often, not on time.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # record list changes in subscribers.json
+
+concurrency:
+  # Shared with find-chat-id.yml: both write subscribers.json, and two
+  # simultaneous writers would race on the push.
+  group: telegram-subscribers
+  cancel-in-progress: false
+
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ask Telegram what has arrived
+        id: poll
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "TELEGRAM_BOT_TOKEN is not set; nothing to poll."
+            echo "skip=yes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          OFFSET=$(python3 -c "
+          import json, pathlib
+          p = pathlib.Path('subscribers.json')
+          d = json.loads(p.read_text()) if p.is_file() else {}
+          print(int(d.get('last_update_id') or 0) + 1)
+          " 2>/dev/null || echo 1)
+          echo "Asking for updates from offset ${OFFSET}."
+
+          # timeout=0 keeps this a short poll rather than a long one; the cron is
+          # what provides the cadence.
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "https://api.telegram.org/bot${TOKEN}/getUpdates" \
+                 --data-urlencode "offset=${OFFSET}" \
+                 --data-urlencode "timeout=0" \
+                 -o /tmp/upd.json; then
+            echo "::warning::Could not reach Telegram."
+            echo "skip=yes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # stderr dropped: a 502 HTML body raises a traceback that says nothing
+          # the warning does not, and these logs are public.
+          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('/tmp/upd.json')).get('ok') else 1)" 2>/dev/null; then
+            echo "::warning::Telegram rejected getUpdates. Check the bot token."
+            echo "skip=yes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/upd.json')).get('result') or []))")
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "${COUNT} update(s) waiting."
+          # The overwhelming majority of polls find nothing. Skip the rest so the
+          # run is a couple of seconds and leaves no noise behind.
+          [ "$COUNT" = "0" ] && echo "skip=yes" >> "$GITHUB_OUTPUT" || true
+
+      - name: Act on it
+        if: steps.poll.outputs.skip != 'yes'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+          python3 scripts/subscribers.py process \
+            --updates /tmp/upd.json --replies /tmp/replies.json || exit 0
+          TELEGRAM_BOT_TOKEN="$TOKEN" bash scripts/send_replies.sh /tmp/replies.json
+
+      - name: Record what changed
+        if: steps.poll.outputs.skip != 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- subscribers.json; then
+            echo "subscribers.json unchanged."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git add -- subscribers.json
+          git commit -m "Update briefing subscribers" \
+            -m "From a Telegram poll: $(python3 -c "
+          import json
+          d = json.load(open('subscribers.json'))
+          print(f\"{len(d['approved'])} approved, {len(d['pending'])} pending, \"
+                f\"{len(d['unsubscribed'])} opted out\")
+          ")"
+
+          # The briefing pushes to main several times a week, and this runs every
+          # five minutes, so being behind is the normal case rather than the
+          # exception. Rebase and retry rather than failing the poll.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+              && git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "::warning::Push attempt ${attempt} lost a race; retrying."
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Could not record the change after three attempts."
+          echo "::error::The replies WERE sent, but last_update_id was not saved, so"
+          echo "::error::the next poll will read those messages again and answer them"
+          echo "::error::a second time. A duplicate confirmation is the deliberate"
+          echo "::error::choice here: confirming to Telegram before the commit would"
+          echo "::error::instead lose the opt-out silently, which is worse."
+          exit 1

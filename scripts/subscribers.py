@@ -44,7 +44,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 STORE = REPO / "subscribers.json"
 
-EMPTY = {"approved": [], "pending": [], "unsubscribed": []}
+EMPTY = {"approved": [], "pending": [], "unsubscribed": [], "last_update_id": 0}
 
 # /subscribe and /unsubscribe are accepted alongside the conventional Telegram
 # commands because people type what they mean, not what the bot documents.
@@ -82,9 +82,9 @@ STATE_OUTCOMES = {"pending", "approved", "stopped", "already-subscribed"}
 
 
 def norm(data: dict) -> dict:
-    """Fill in any list a hand-edit or an older file is missing."""
-    for key in EMPTY:
-        data.setdefault(key, [])
+    """Fill in anything a hand-edit or an older file is missing."""
+    for key, blank in EMPTY.items():
+        data.setdefault(key, type(blank)())
     return data
 
 
@@ -109,6 +109,13 @@ def save(data: dict, path: Path = STORE) -> None:
         "approved": sorted(data["approved"], key=lambda e: e["chat_id"]),
         "pending": sorted(data["pending"], key=lambda e: e["chat_id"]),
         "unsubscribed": sorted(data["unsubscribed"], key=lambda e: e["chat_id"]),
+        # The highest Telegram update already handled. This is what makes every
+        # message act exactly once: the poller asks for offset = this + 1, and
+        # process() ignores anything at or below it even if Telegram sends it
+        # again. Without it, a poller running every few minutes would re-read the
+        # same /start out of Telegram's 24-hour backlog and answer it on every
+        # pass — roughly 288 identical messages a day to one person.
+        "last_update_id": data["last_update_id"],
     }
     path.write_text(json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
 
@@ -275,6 +282,28 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
     """
     norm(data)
     before = sizes(data)
+
+    # Act on each update once and only once. The poller asks Telegram for
+    # offset = last_update_id + 1, but this filter is what actually guarantees
+    # it: an offset that fails to stick, a retry, or a second reader would
+    # otherwise replay the backlog and re-answer every message in it.
+    seen = data["last_update_id"]
+    incoming = updates.get("result", [])
+    all_ids = [u["update_id"] for u in incoming if isinstance(u.get("update_id"), int)]
+
+    def is_fresh(u):
+        uid = u.get("update_id")
+        # An update with no usable id cannot be de-duplicated. Process it and
+        # risk a repeated reply rather than drop it: a duplicate confirmation is
+        # a nuisance, an opt-out that vanished is a person still being messaged
+        # after they asked us to stop.
+        return not isinstance(uid, int) or uid > seen
+
+    fresh = {"result": [u for u in incoming if is_fresh(u)]}
+    skipped = len(incoming) - len(fresh["result"])
+    highest = max(all_ids + [seen])
+
+    updates = fresh
     data, report = sync(updates, data, owner)
     state, info, diag_cmds = {}, [], []
 
@@ -361,8 +390,12 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
                      + "\n\nReply /approve <id> to enable, /deny <id> to refuse, "
                        "/pending to list everyone waiting."})
 
+    data["last_update_id"] = highest
+
     diag = {
         "updates": len(updates.get("result", [])),
+        "skipped_already_handled": skipped,
+        "last_update_id": highest,
         "chats_seen": len(report),
         "states": {s: sum(1 for r in report if r["state"] == s)
                    for s in {r["state"] for r in report}},
