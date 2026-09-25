@@ -87,7 +87,43 @@ step**, so a bad run cannot produce a strange commit.
 Note that a push made with `GITHUB_TOKEN` does **not** fire another workflow's
 `push` trigger. That is why the last step invokes `deliver.yml` explicitly
 through the `workflow_dispatch` input it already exposes, rather than relying on
-the push. `deliver.yml` is otherwise untouched.
+the push.
+
+## Who receives it
+
+Two places, on purpose:
+
+| recipient | stored in | visibility |
+|---|---|---|
+| the owner | `TELEGRAM_CHAT_ID` secret | private |
+| everyone else | `subscribers.json`, `approved` list | **public — this repo is public** |
+
+`deliver.yml` sends to the owner first, then to every approved subscriber. It
+uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
+twenty recipients cost one upload rather than twenty.
+
+**Adding someone.** They message the bot, then run **Actions → Find my Telegram
+chat ID**. Every chat that has messaged the bot is listed; ones we have not seen
+before are recorded in `subscribers.json` under `pending`, which entitles them
+to nothing. Re-run the workflow with their id in the `approve` input and they
+receive the next edition. The `remove` input takes them back off.
+
+Approval is a separate step deliberately. Anyone who finds the bot can message
+it, so enrolling automatically would mean strangers receiving the briefing and
+spending the Telegram send quota. **Discovery is automatic; consent is not.**
+
+Only numeric chat IDs and a chat type are ever committed — never names or
+usernames. The workflow prints display names in its log so you can tell who is
+asking to be added, and on a public repository **run logs are public too**, so
+that is the one place a subscriber's name is briefly exposed. If that matters,
+make the repo private; nothing else in the pipeline depends on it being public
+except free Actions minutes.
+
+**A subscriber who blocks the bot** fails every morning with
+`403 Forbidden: bot was blocked by the user`. That is a warning, not a failure —
+one dead subscriber must not stop the briefing reaching everyone else. The job
+summary names them; drop them with the `remove` input. A failure delivering to
+the *owner* does fail the job, because that means the setup itself is broken.
 
 ## Verification gate
 
@@ -222,6 +258,7 @@ Locally, three suites — the workflow runs all three before spending anything:
 python3 scripts/test_gate.py        # schedule: DST, holidays, gaps, cron delay
 python3 scripts/test_verify.py      # spec validation, incl. the edition log
 python3 scripts/test_run_report.py  # stage detection on real failure shapes
+python3 scripts/test_subscribers.py # who receives it, and who must not
 ```
 
 ## Cost

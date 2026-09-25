@@ -87,6 +87,12 @@ jobs:
           python3 scripts/test_gate.py
           python3 scripts/test_verify.py
           python3 scripts/test_run_report.py
+          # Delivery runs in deliver.yml, but its tests run here: a broken
+          # subscriber list would send the briefing to the wrong people, and
+          # this is the job that runs every morning. Failing here stops a bad
+          # edition being made at all, rather than stopping a good one being
+          # delivered.
+          python3 scripts/test_subscribers.py
 
       - name: Decide whether to run
         id: gate

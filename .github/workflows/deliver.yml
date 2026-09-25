@@ -2,6 +2,10 @@ name: Deliver briefing to Telegram
 
 # Fires whenever a new PDF lands in editions/.
 # Also runnable by hand from the Actions tab (optionally naming a specific file).
+#
+# Sends to the owner (the TELEGRAM_CHAT_ID secret) plus every approved chat in
+# subscribers.json. Use the "Find my Telegram chat ID" workflow to enrol people;
+# this workflow only reads the list.
 
 on:
   push:
@@ -29,6 +33,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Select the PDF to send
         id: pick
@@ -62,37 +70,136 @@ jobs:
           echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
           echo "Selected: $PDF (${SIZE_MB}MB)"
 
-      - name: Send to Telegram
+      - name: Send to every recipient
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          PDF:   ${{ steps.pick.outputs.pdf }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PDF: ${{ steps.pick.outputs.pdf }}
         run: |
           set -euo pipefail
 
-          if [ -z "${TOKEN:-}" ] || [ -z "${CHAT:-}" ]; then
-            echo "::error::TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID secret is not set."
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN secret is not set."
             exit 1
           fi
 
-          # Turn Daily_Economic_Briefing_2026-08-13.pdf into a readable caption.
+          # Owner first, then approved subscribers. One id per line.
+          mapfile -t RECIPIENTS < <(python3 scripts/subscribers.py recipients)
+          if [ "${#RECIPIENTS[@]}" -eq 0 ]; then
+            echo "::error::No recipients. Set TELEGRAM_CHAT_ID, or approve a subscriber"
+            echo "::error::with the 'Find my Telegram chat ID' workflow."
+            exit 1
+          fi
+
           DATE="$(basename "$PDF" .pdf | sed 's/.*_//')"
           CAPTION="Daily Economic Briefing — ${DATE}"
+          echo "Sending ${PDF} to ${#RECIPIENTS[@]} recipient(s)."
 
-          HTTP=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
-            -o /tmp/tg.json -w '%{http_code}' \
-            -F "chat_id=${CHAT}" \
-            -F "caption=${CAPTION}" \
-            -F "document=@${PDF};type=application/pdf" \
-            "https://api.telegram.org/bot${TOKEN}/sendDocument")
+          # Reads /tmp/tg.json and prints one line: "ok|<file_id>|<description>".
+          # Only these three fields ever leave the response — the raw body
+          # echoes chat metadata, and these logs are public.
+          read_reply() {
+            python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open('/tmp/tg.json'))
+          except Exception as exc:
+              print(f"no|error|unparseable response: {exc}")
+          else:
+              doc = (d.get('result') or {}).get('document') or {}
+              print("{}|{}|{}".format(
+                  'yes' if d.get('ok') else 'no',
+                  doc.get('file_id', ''),
+                  (d.get('description') or 'none').replace('|', '/'),
+              ))
+          PY
+          }
 
-          echo "HTTP ${HTTP}"
-          # Never print the raw body unfiltered — it can echo back chat metadata.
-          python3 -c "import json,sys; d=json.load(open('/tmp/tg.json')); print('ok:', d.get('ok'), '| error:', d.get('description','none'))"
+          # One send. Never aborts the job: a curl that fails at the network
+          # level (rather than returning an HTTP error) would otherwise kill the
+          # loop mid-list under `set -e` and skip the summary, losing both the
+          # remaining recipients and the record of who did get it.
+          send_to() {
+            local chat="$1" docarg="$2" http rc
+            set +e
+            http=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+              -o /tmp/tg.json -w '%{http_code}' \
+              -F "chat_id=${chat}" -F "caption=${CAPTION}" \
+              -F "document=${docarg}" \
+              "https://api.telegram.org/bot${TOKEN}/sendDocument")
+            rc=$?
+            set -e
+            if [ "$rc" != "0" ]; then
+              echo '{"ok":false,"description":"curl failed to reach Telegram"}' > /tmp/tg.json
+              http="000"
+            fi
+            printf '%s' "$http"
+          }
 
-          if [ "$HTTP" != "200" ]; then
-            echo "::error::Telegram returned HTTP ${HTTP}. Check the bot token, the chat ID, and that you have sent /start to the bot."
-            exit 1
+          FILE_ID=""
+          FAILED=()
+          SENT=0
+
+          for i in "${!RECIPIENTS[@]}"; do
+            CHAT="${RECIPIENTS[$i]}"
+
+            # Upload the PDF once. Telegram returns a file_id for the stored
+            # copy, and every later send reuses it — so a list of twenty costs
+            # one upload, not twenty, and the sends are far less likely to time
+            # out. A file_id is also how the same document arrives identically
+            # for everyone rather than as N separate uploads.
+            if [ -z "$FILE_ID" ]; then
+              HTTP=$(send_to "$CHAT" "@${PDF};type=application/pdf")
+            else
+              HTTP=$(send_to "$CHAT" "$FILE_ID")
+            fi
+
+            IFS='|' read -r OK NEW_ID DESC <<< "$(read_reply)"
+
+            if [ "$HTTP" = "200" ] && [ "$OK" = "yes" ]; then
+              SENT=$((SENT + 1))
+              # Guarded with `if` rather than a && chain: the chain is exempt
+              # from `set -e` today only because the assignment is last, which
+              # is too subtle to rely on in an unattended path.
+              if [ -z "$FILE_ID" ] && [ -n "$NEW_ID" ]; then
+                FILE_ID="$NEW_ID"
+              fi
+              echo "  sent to ${CHAT}"
+            else
+              FAILED+=("${CHAT} (HTTP ${HTTP}: ${DESC})")
+              echo "::warning::Delivery to ${CHAT} failed — HTTP ${HTTP}: ${DESC}"
+              # The owner is first in the list. If their delivery fails the
+              # whole thing is broken, not one stale subscriber, and the
+              # file_id needed by everyone else was never issued.
+              if [ "$i" = "0" ] && [ -n "${OWNER_CHAT_ID:-}" ]; then
+                echo "::error::The owner's delivery failed. Check the bot token, the"
+                echo "::error::TELEGRAM_CHAT_ID secret, and that you have sent /start."
+                exit 1
+              fi
+            fi
+
+            # Stay well inside Telegram's bulk limits. Skipped after the last
+            # one so a single-recipient send is not needlessly slower.
+            [ "$i" -lt "$(( ${#RECIPIENTS[@]} - 1 ))" ] && sleep 1 || true
+          done
+
+          {
+            echo "## Telegram delivery"
+            echo
+            echo "\`${PDF}\` — **${SENT} of ${#RECIPIENTS[@]} delivered**."
+            if [ "${#FAILED[@]}" -gt 0 ]; then
+              echo
+              echo "Failed:"
+              for f in "${FAILED[@]}"; do echo "- ${f}"; done
+              echo
+              echo "A chat that has blocked the bot or been deleted will fail every"
+              echo "morning. Drop it with the \`remove\` input on **Find my Telegram"
+              echo "chat ID**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${#FAILED[@]}" -gt 0 ]; then
+            echo "Delivered to ${SENT}/${#RECIPIENTS[@]}; ${#FAILED[@]} subscriber(s) failed."
+          else
+            echo "Delivered ${PDF} to all ${SENT} recipient(s)."
           fi
-
-          echo "Delivered ${PDF} to Telegram."

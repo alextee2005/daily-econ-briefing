@@ -1,0 +1,5 @@
+{
+  "_comment": "Recipients of the daily briefing, besides the owner. Approved chats receive it; pending chats have only messaged the bot and receive nothing. Move an id between the lists with scripts/subscribers.py, or by hand. Numeric ids only \u2014 never add names or usernames, this repository is public.",
+  "approved": [],
+  "pending": []
+}
