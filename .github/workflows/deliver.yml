@@ -139,9 +139,19 @@ jobs:
           FILE_ID=""
           FAILED=()
           SENT=0
+          ROWS=""
+          STARTED=$(date +%s)
 
           for i in "${!RECIPIENTS[@]}"; do
             CHAT="${RECIPIENTS[$i]}"
+            # Recipient zero is the owner when one is configured; naming the
+            # role in the table saves cross-referencing the secret to work out
+            # whose delivery failed.
+            if [ "$i" = "0" ] && [ -n "${OWNER_CHAT_ID:-}" ]; then
+              ROLE="owner"
+            else
+              ROLE="subscriber"
+            fi
 
             # Upload the PDF once. Telegram returns a file_id for the stored
             # copy, and every later send reuses it — so a list of twenty costs
@@ -156,6 +166,8 @@ jobs:
 
             IFS='|' read -r OK NEW_ID DESC <<< "$(read_reply)"
 
+            if [ -z "$FILE_ID" ]; then HOW="uploaded"; else HOW="reused file_id"; fi
+
             if [ "$HTTP" = "200" ] && [ "$OK" = "yes" ]; then
               SENT=$((SENT + 1))
               # Guarded with `if` rather than a && chain: the chain is exempt
@@ -164,8 +176,10 @@ jobs:
               if [ -z "$FILE_ID" ] && [ -n "$NEW_ID" ]; then
                 FILE_ID="$NEW_ID"
               fi
-              echo "  sent to ${CHAT}"
+              echo "  sent to ${CHAT} (${HOW})"
+              ROWS="${ROWS}| \`${CHAT}\` | ${ROLE} | ${HOW} | sent |"$'\n'
             else
+              ROWS="${ROWS}| \`${CHAT}\` | ${ROLE} | ${HOW} | **failed** — HTTP ${HTTP}: ${DESC} |"$'\n'
               FAILED+=("${CHAT} (HTTP ${HTTP}: ${DESC})")
               echo "::warning::Delivery to ${CHAT} failed — HTTP ${HTTP}: ${DESC}"
               # The owner is first in the list. If their delivery fails the
@@ -183,19 +197,29 @@ jobs:
             [ "$i" -lt "$(( ${#RECIPIENTS[@]} - 1 ))" ] && sleep 1 || true
           done
 
+          ELAPSED=$(( $(date +%s) - STARTED ))
+
+          # Every recipient is listed, not only the failures: a run that says
+          # nothing about who received it cannot be checked afterwards, and
+          # "delivered" with the wrong recipient count is the failure that would
+          # otherwise go unnoticed.
           {
             echo "## Telegram delivery"
             echo
-            echo "\`${PDF}\` — **${SENT} of ${#RECIPIENTS[@]} delivered**."
+            echo "\`${PDF}\` ($(( $(stat -c%s "$PDF") / 1024 )) KB) — "\
+                 "**${SENT} of ${#RECIPIENTS[@]} delivered** in ${ELAPSED}s."
+            echo
+            echo "| chat | role | transfer | result |"
+            echo "|---|---|---|---|"
+            printf '%s' "$ROWS"
             if [ "${#FAILED[@]}" -gt 0 ]; then
-              echo
-              echo "Failed:"
-              for f in "${FAILED[@]}"; do echo "- ${f}"; done
               echo
               echo "A chat that has blocked the bot or been deleted will fail every"
               echo "morning. Drop it with the \`remove\` input on **Find my Telegram"
-              echo "chat ID**."
+              echo "chat ID**, or let the subscriber send /stop."
             fi
+            echo
+            echo "One upload plus $(( SENT > 0 ? SENT - 1 : 0 )) file_id reuse(s)."
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "${#FAILED[@]}" -gt 0 ]; then

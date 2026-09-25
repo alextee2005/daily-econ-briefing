@@ -66,6 +66,20 @@ MSG = {
                    "in the repository, not by this bot, so it will keep arriving."),
 }
 
+# What the owner can do from the chat itself, so approving does not mean opening
+# GitHub on a phone. Honoured only from the owner's own chat — see
+# owner_requests() for why the chat id is sufficient authorisation.
+OWNER_COMMANDS = {
+    "/approve": "approve", "/deny": "deny",
+    "/pending": "pending", "/status": "status",
+}
+
+# Replies are either about one chat's own subscription state, in which case only
+# the last one that morning should be sent, or a note to the owner, in which case
+# every one matters. Without this split, telling the owner about a new request
+# and answering their /pending in the same sweep would lose one of the two.
+STATE_OUTCOMES = {"pending", "approved", "stopped", "already-subscribed"}
+
 
 def norm(data: dict) -> dict:
     """Fill in any list a hand-edit or an older file is missing."""
@@ -139,6 +153,16 @@ def chats_from_updates(updates: dict) -> list:
     return list(seen.values())
 
 
+def messages(updates: dict):
+    """Every update that carries a chat, as (chat_id, type, text)."""
+    for u in updates.get("result", []):
+        msg = u.get("message") or u.get("channel_post") or u.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        cid = chat.get("id")
+        if cid is not None:
+            yield cid, chat.get("type", "?"), (msg.get("text") or "").strip()
+
+
 def commands_from_updates(updates: dict) -> list:
     """The /start and /stop requests in a payload, at most one per chat.
 
@@ -148,17 +172,51 @@ def commands_from_updates(updates: dict) -> list:
     split on '@'.
     """
     latest = {}
-    for u in updates.get("result", []):
-        msg = u.get("message") or u.get("channel_post") or u.get("edited_message") or {}
-        chat = msg.get("chat") or {}
-        cid = chat.get("id")
-        text = (msg.get("text") or "").strip()
-        if cid is None or not text.startswith("/"):
+    for cid, ctype, text in messages(updates):
+        if not text.startswith("/"):
             continue
         verb = COMMANDS.get(text.split()[0].split("@")[0].lower())
         if verb:
-            latest[cid] = {"chat_id": cid, "type": chat.get("type", "?"), "command": verb}
+            latest[cid] = {"chat_id": cid, "type": ctype, "command": verb}
     return list(latest.values())
+
+
+def owner_requests(updates: dict, owner: int | None) -> tuple[list, list, list]:
+    """The owner's instructions, in the order they were sent.
+
+    Returns (accepted, rejected, unknown).
+
+    Unlike /start and /stop these are NOT reduced to one per chat: the owner may
+    well send `/approve 222` and then `/approve 333`, and both must be applied.
+
+    Authorisation is the chat id alone, and that is sound rather than lazy —
+    Telegram asserts the id in the payload, the sender cannot set it, and the
+    owner's id comes from a repository secret no message can influence. A
+    command from anyone else is returned in `rejected` rather than dropped
+    silently, because someone probing for an admin interface is worth seeing in
+    the log.
+    """
+    accepted, rejected, unknown = [], [], []
+    for cid, _ctype, text in messages(updates):
+        if not text.startswith("/"):
+            continue
+        head = text.split()[0].split("@")[0].lower()
+        verb = OWNER_COMMANDS.get(head)
+        if not verb:
+            if head not in COMMANDS:
+                unknown.append({"chat_id": cid, "command": head})
+            continue
+        if owner is None or cid != owner:
+            rejected.append({"chat_id": cid, "command": verb})
+            continue
+        args, bad = [], []
+        for tok in text.split()[1:]:
+            try:
+                args.append(int(tok.strip(",")))
+            except ValueError:
+                bad.append(tok)
+        accepted.append({"command": verb, "ids": args, "unparsed": bad})
+    return accepted, rejected, unknown
 
 
 def sync(updates: dict, data: dict, owner: int | None) -> tuple[dict, list]:
@@ -192,18 +250,38 @@ def sync(updates: dict, data: dict, owner: int | None) -> tuple[dict, list]:
     return data, report
 
 
-def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, list]:
-    """Record new chats, then act on /start and /stop.
+def sizes(data: dict) -> dict:
+    return {k: len(data[k]) for k in ("approved", "pending", "unsubscribed")}
 
-    Commands are applied after the sweep so that a /stop wins over the same
-    message having just registered the chat as a candidate. Returns the store,
-    the sync report, and the replies to send — a silent /stop is worse than no
-    /stop at all, because the person believes they have left.
+
+def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, list, dict]:
+    """Record new chats, act on /start and /stop, then on the owner's commands.
+
+    Returns the store, the sync report, the replies to send, and a diagnostic
+    record of everything that happened — every update classified, every command
+    accepted, rejected or not understood, and the list sizes before and after.
+    When this misbehaves it will be at 07:20 on someone else's phone, so the run
+    log has to explain itself without a re-run.
+
+    Ordering is deliberate, and it is the whole of the logic:
+
+      1. sync        — an unseen chat becomes a candidate
+      2. /start,/stop — the chat's own wishes, latest message winning
+      3. owner       — /approve and /deny, which override the above
+
+    So a /start and the owner's /approve arriving in the same 24-hour window are
+    resolved in one sweep, and the subscriber is told only the outcome rather
+    than "pending" followed immediately by "approved".
     """
     norm(data)
+    before = sizes(data)
     data, report = sync(updates, data, owner)
-    replies = []
+    state, info, diag_cmds = {}, [], []
 
+    def set_state(cid, outcome):
+        state[cid] = reply(cid, outcome)
+
+    # --- 2. the subscribers' own requests -------------------------------------
     for req in commands_from_updates(updates):
         cid, verb = req["chat_id"], req["command"]
 
@@ -211,7 +289,7 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
             # The owner's copy comes from a repository secret, which no message
             # can change. Say so rather than appearing to comply.
             if verb == "stop":
-                replies.append(reply(cid, "owner-stop"))
+                info.append(reply(cid, "owner-stop"))
             continue
 
         if verb == "stop":
@@ -223,20 +301,78 @@ def process(updates: dict, data: dict, owner: int | None) -> tuple[dict, list, l
             # Always confirm, even to a chat that was never on the list. Someone
             # who sends /stop wants to know it worked, and "you were not
             # subscribed anyway" is not reassurance they can act on.
-            replies.append(reply(cid, "stopped"))
+            set_state(cid, "stopped")
         else:
             data["unsubscribed"] = [e for e in data["unsubscribed"] if e["chat_id"] != cid]
             if cid in ids(data["approved"]):
-                replies.append(reply(cid, "already-subscribed"))
+                set_state(cid, "already-subscribed")
             else:
                 if cid not in ids(data["pending"]):
                     data["pending"].append(
                         {"chat_id": cid, "type": req["type"],
                          "seen": date.today().isoformat()}
                     )
-                replies.append(reply(cid, "pending"))
+                set_state(cid, "pending")
 
-    return data, report, replies
+    # --- 3. the owner's instructions ------------------------------------------
+    accepted, rejected, unknown = owner_requests(updates, owner)
+    for cmd in accepted:
+        verb, targets = cmd["command"], cmd["ids"]
+        outcome = {"command": verb, "ids": targets, "unparsed": cmd["unparsed"], "notes": []}
+
+        if verb == "approve":
+            told = []
+            notes = approve(set(targets), data, owner, replies=told)
+            outcome["notes"] = [f"{c}: {n}" for c, n in notes]
+            for r in told:
+                # Replaces any "pending" queued for this chat a moment ago.
+                set_state(r["chat_id"], "approved")
+        elif verb == "deny":
+            outcome["notes"] = [f"{c}: {n}" for c, n in remove(set(targets), data, remember=True)]
+            # Deliberately silent to the subscriber. "You were refused" helps
+            # nobody, and denial is also how obvious spam is cleared.
+        elif verb in ("pending", "status"):
+            s = sizes(data)
+            pend = ", ".join(str(e["chat_id"]) for e in data["pending"]) or "none"
+            body = (f"Approved: {s['approved']}. Awaiting approval: {s['pending']}. "
+                    f"Opted out: {s['unsubscribed']}.")
+            if verb == "pending":
+                body += (f"\nPending ids: {pend}"
+                         f"\nReply /approve <id> to enable, /deny <id> to refuse.")
+            info.append({"chat_id": owner, "outcome": f"owner-{verb}", "text": body})
+            outcome["notes"] = [body.replace("\n", " | ")]
+
+        diag_cmds.append(outcome)
+
+    # Tell the owner who is waiting, with the display name, so the decision can
+    # be made in the chat rather than against a bare number. This is the one
+    # place a subscriber's name is used, and it goes only to the owner's private
+    # chat — never to the store, never to a public log.
+    #
+    # Built last, and filtered to chats still pending, so the owner is not asked
+    # to consider somebody who unsubscribed or was approved in this same sweep.
+    still_waiting = ids(data["pending"])
+    newcomers = [r for r in report if r["state"] == "new" and r["chat_id"] in still_waiting]
+    if owner is not None and newcomers:
+        lines = [f"{r['label']} — chat {r['chat_id']} ({r['type']})" for r in newcomers]
+        info.append({"chat_id": owner, "outcome": "owner-new-requests", "text":
+                     f"{len(newcomers)} new subscription request(s):\n"
+                     + "\n".join(lines)
+                     + "\n\nReply /approve <id> to enable, /deny <id> to refuse, "
+                       "/pending to list everyone waiting."})
+
+    diag = {
+        "updates": len(updates.get("result", [])),
+        "chats_seen": len(report),
+        "states": {s: sum(1 for r in report if r["state"] == s)
+                   for s in {r["state"] for r in report}},
+        "owner_commands": diag_cmds,
+        "rejected_commands": rejected,
+        "unknown_commands": unknown,
+        "before": before,
+        "after": sizes(data),
+    }
+    return data, report, list(state.values()) + info, diag
 
 
 def approve(targets: set, data: dict, owner: int | None,
@@ -317,6 +453,55 @@ def recipients(data: dict, owner: int | None) -> list:
     return out
 
 
+def write_step_summary(diag: dict, data: dict, replies: list) -> None:
+    """Put the sweep on the run's summary page, beside the stage table.
+
+    The log already says everything, but nobody reads a log for a run that
+    succeeded — and a subscription that silently did not happen looks exactly
+    like a run that succeeded.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    b, a = diag["before"], diag["after"]
+    out = ["## Subscriptions", "",
+           f"{diag['updates']} update(s) from {diag['chats_seen']} chat(s).", "",
+           "| list | before | after |", "|---|---|---|"]
+    for key, label in (("approved", "approved"), ("pending", "awaiting approval"),
+                       ("unsubscribed", "opted out")):
+        arrow = "" if b[key] == a[key] else " ←"
+        out.append(f"| {label} | {b[key]} | **{a[key]}**{arrow} |")
+
+    if diag["owner_commands"]:
+        out += ["", "**Owner commands**", ""]
+        for c in diag["owner_commands"]:
+            arg = " ".join(str(i) for i in c["ids"])
+            out.append(f"- `/{c['command']}{' ' + arg if arg else ''}`")
+            out += [f"  - {n}" for n in c["notes"]]
+            if c["unparsed"]:
+                out.append(f"  - **ignored, not a chat id:** {', '.join(c['unparsed'])}")
+
+    # Only what was queued. send_replies.sh appends the delivery result for each
+    # one, which is the table worth reading — listing them twice would invite
+    # mistaking "queued" for "sent".
+    if replies:
+        out += ["", f"{len(replies)} message(s) queued: "
+                + ", ".join(sorted(r["outcome"] for r in replies)) + "."]
+
+    if diag["rejected_commands"]:
+        out += ["", "**Owner-only commands from other chats — ignored**", ""]
+        out += [f"- `/{r['command']}` from `{r['chat_id']}`" for r in diag["rejected_commands"]]
+
+    if data["pending"]:
+        out += ["", "**Awaiting your approval:** "
+                + ", ".join(f"`{e['chat_id']}`" for e in data["pending"])
+                + " — reply `/pending` to the bot, or use the `approve` input on "
+                  "*Find my Telegram chat ID*."]
+
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+
+
 def parse_ids(raw: str) -> set:
     out = set()
     for part in raw.replace(",", " ").split():
@@ -352,22 +537,49 @@ def main() -> int:
         if not args.updates:
             raise SystemExit("process needs --updates")
         payload = json.loads(Path(args.updates).read_text(encoding="utf-8"))
-        data, report, replies = process(payload, data, owner)
+        data, report, replies, diag = process(payload, data, owner)
         save(data, store)
         if args.replies:
             Path(args.replies).write_text(json.dumps(replies), encoding="utf-8")
 
-        acted = {r["outcome"] for r in replies}
-        print(f"{len(report)} chat(s) seen, {len(replies)} command(s) acted on"
-              f"{': ' + ', '.join(sorted(acted)) if acted else ''}")
-        for r in replies:
-            print(f"  {r['chat_id']}: {r['outcome']}")
-        print(f"Delivering to the owner plus {len(data['approved'])} subscriber(s); "
-              f"{len(data['pending'])} awaiting approval, "
-              f"{len(data['unsubscribed'])} opted out.")
+        print(f"\n{diag['updates']} update(s) from {diag['chats_seen']} chat(s): "
+              + (", ".join(f"{n} {s}" for s, n in sorted(diag["states"].items())) or "none"))
+
+        for r in report:
+            print(f"  [{r['state']:>12}] {r['chat_id']:>14}  {r['type']:<9} {r['label']}")
+
+        if diag["owner_commands"]:
+            print("\nOwner commands:")
+            for c in diag["owner_commands"]:
+                arg = " ".join(str(i) for i in c["ids"]) or "-"
+                print(f"  /{c['command']} {arg}")
+                for n in c["notes"]:
+                    print(f"      {n}")
+                if c["unparsed"]:
+                    # Say so rather than silently ignoring it: the owner thinks
+                    # they approved somebody.
+                    print(f"      ::warning::not a chat id, ignored: {', '.join(c['unparsed'])}")
+
+        # A command from anyone but the owner is a security signal, not noise.
+        for r in diag["rejected_commands"]:
+            print(f"::warning::/{r['command']} from {r['chat_id']} is not the owner — ignored.")
+        for u in diag["unknown_commands"]:
+            print(f"  (ignored unknown command {u['command']} from {u['chat_id']})")
+
+        b, a = diag["before"], diag["after"]
+        print(f"\nLists: approved {b['approved']}->{a['approved']}, "
+              f"pending {b['pending']}->{a['pending']}, "
+              f"opted out {b['unsubscribed']}->{a['unsubscribed']}")
+        print(f"Replies to send: {len(replies)}"
+              + (f" ({', '.join(sorted(r['outcome'] for r in replies))})" if replies else ""))
+        print(f"This edition goes to the owner plus {a['approved']} subscriber(s).")
+
         if data["pending"]:
-            print("::notice::Chats awaiting approval: "
-                  + ", ".join(str(e["chat_id"]) for e in data["pending"]))
+            print("::notice::Awaiting approval: "
+                  + ", ".join(str(e["chat_id"]) for e in data["pending"])
+                  + " — reply /pending to the bot, or use the approve input here.")
+
+        write_step_summary(diag, data, replies)
         return 0
 
     if args.action == "sync":

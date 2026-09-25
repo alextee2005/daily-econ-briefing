@@ -133,17 +133,45 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Show the current delivery list
+        if: always()
         env:
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          set -euo pipefail
-          COUNT=$(python3 scripts/subscribers.py recipients | wc -l)
-          {
-            echo "## Briefing delivery list"
-            echo
-            echo "**${COUNT} recipient(s)** will receive the next edition."
-            echo
-            echo "The owner's chat ID comes from the \`TELEGRAM_CHAT_ID\` secret and is"
-            echo "not listed here. Approved subscribers are in \`subscribers.json\`."
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -uo pipefail
+
+          # always(), so a run that failed earlier still says what the list looks
+          # like. "Did my approval actually land?" is the question this page
+          # exists to answer, and a failed run is exactly when it is asked.
+          COUNT=$(python3 scripts/subscribers.py recipients 2>/dev/null | wc -l)
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+          p = pathlib.Path("subscribers.json")
+          d = json.loads(p.read_text()) if p.is_file() else {}
+          owner = (os.environ.get("OWNER_CHAT_ID") or "").strip()
+
+          def row(key, label):
+              n = len(d.get(key) or [])
+              who = ", ".join(f"`{e['chat_id']}`" for e in (d.get(key) or [])) or "—"
+              return f"| {label} | {n} | {who} |"
+
+          print("## Briefing delivery list\n")
+          print(f"**{1 if owner else 0} owner + {len(d.get('approved') or [])} "
+                "subscriber(s)** will receive the next edition.\n")
+          print("| list | count | chats |")
+          print("|---|---|---|")
+          print(row("approved", "receiving it"))
+          print(row("pending", "awaiting approval"))
+          print(row("unsubscribed", "opted out"))
+          print()
+          if not owner:
+              print("> `TELEGRAM_CHAT_ID` is **not set**, so the owner receives nothing. "
+                    "Only the subscribers above are sent to.\n")
+          else:
+              print("The owner's chat ID comes from the `TELEGRAM_CHAT_ID` secret and is "
+                    "deliberately not listed here.\n")
+          if d.get("pending"):
+              print("To enrol someone, re-run this workflow with their id in the "
+                    "`approve` input — or reply `/approve <id>` to the bot, which the "
+                    "next briefing run applies.")
+          PY
           echo "Recipients for the next edition: ${COUNT}"

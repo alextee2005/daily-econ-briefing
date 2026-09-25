@@ -104,9 +104,39 @@ twenty recipients cost one upload rather than twenty.
 
 **Adding someone.** They send the bot `/start`. Every weekday, *before* it
 delivers, `briefing.yml` reads `getUpdates` and records them under `pending`,
-which entitles them to nothing, and replies telling them so. To enrol them, run
-**Actions → Find my Telegram chat ID** with their id in the `approve` input;
-they receive the next edition. The `remove` input takes them back off.
+which entitles them to nothing, and replies telling them so. The same sweep
+messages **you** with their name and id, so you can decide without opening
+GitHub.
+
+Two ways to enrol them, and they do the same thing:
+
+| | how | applied |
+|---|---|---|
+| From Telegram | reply `/approve <id>` to the bot | next briefing run |
+| From GitHub | **Actions → Find my Telegram chat ID**, `approve` input | immediately |
+
+The owner's commands, honoured **only** from the owner's own chat:
+
+| command | effect |
+|---|---|
+| `/approve <id> [<id>…]` | enrol; the subscriber is told they are approved |
+| `/deny <id> [<id>…]` | drop the request; the subscriber is told nothing |
+| `/pending` | the waiting ids, and how to act on them |
+| `/status` | how many are approved, waiting and opted out |
+
+Authorisation is the sender's chat id, and that is sound rather than lazy:
+Telegram asserts the id in the payload, a sender cannot set it, and the owner's
+id comes from a repository secret no message can influence. A command from
+anyone else changes nothing and is logged as a warning — someone probing for an
+admin interface is worth seeing.
+
+`/deny` is silent on purpose. "You were refused" helps nobody, and denial is
+also how obvious spam gets cleared.
+
+Because `getUpdates` returns everything unconfirmed in its window, a `/start`
+and your `/approve` that both arrive before the next sweep are resolved in one
+pass, and the subscriber is told only the outcome rather than "pending" followed
+seconds later by "approved".
 
 Approval is a separate step deliberately. Anyone who finds the bot can message
 it, so enrolling automatically would mean strangers receiving the briefing and
@@ -181,6 +211,42 @@ except free Actions minutes.
 one dead subscriber must not stop the briefing reaching everyone else. The job
 summary names them; drop them with the `remove` input. A failure delivering to
 the *owner* does fail the job, because that means the setup itself is broken.
+
+### Diagnosing the subscription path
+
+Every run writes what it did to the job summary, because a subscription that
+silently did not happen looks exactly like a run that succeeded.
+
+**On a briefing run,** under *Subscriptions*: how many updates arrived and from
+how many chats, each chat classified (`new`, `pending`, `approved`,
+`unsubscribed`, `owner`), every owner command with its effect, arguments that
+were not chat ids, owner-only commands attempted by other chats, and the three
+list sizes **before and after** with a marker on the ones that moved. Then
+*Bot confirmations*: each message, and for a failure Telegram's own reason.
+
+**On a delivery run,** under *Telegram delivery*: a row per recipient with its
+role (owner or subscriber), whether the PDF was uploaded or a `file_id` reused,
+and the result — including HTTP status and Telegram's description on a failure.
+Every recipient is listed, not only the failures, because a plausible-looking
+"delivered" with the wrong recipient count is the fault that would otherwise go
+unnoticed.
+
+**On Find my Telegram chat ID:** the whole list, by category, with the chats in
+each. It runs on `always()`, so a run that failed earlier still answers the
+question it is usually opened to answer — did my approval land?
+
+Things worth knowing when reading these:
+
+- **`ok: false` with HTTP 200 is a real Telegram response**, and both send paths
+  check it. Trusting the status code alone would report a message as sent when
+  the recipient never got it.
+- **Messages are base64-encoded between the script and the send loop.** The
+  owner's `/pending` answer and the new-request notice are multi-line; an
+  earlier tab-separated version treated each line as its own record and tried to
+  send a message to a chat id of `Pending ids: 555, 777, 888`.
+- A confirmation failing never fails the run. `scripts/send_replies.sh` exits 0
+  unconditionally — a confirmation that does not arrive is a nuisance, a briefing
+  that does not arrive because of one is a fault.
 
 ## Verification gate
 
