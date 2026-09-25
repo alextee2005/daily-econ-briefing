@@ -100,6 +100,22 @@ The variable name must be exactly `QUEUE` — that is what the code looks for.
 Choose **Secret** (encrypted) for the first four so they cannot be read back.
 `LIST_URL` is plain text — it is a public URL.
 
+⚠️ **The names in Cloudflare are NOT the names in GitHub.** The same two random
+strings are stored twice under different names, and copying the GitHub name here
+is the easiest way to break this:
+
+| the string | in Cloudflare | in GitHub |
+|---|---|---|
+| first | `WEBHOOK_SECRET` | `TELEGRAM_WEBHOOK_SECRET` |
+| second | `DRAIN_SECRET` | `TELEGRAM_DRAIN_SECRET` |
+
+A misnamed secret is not an error anywhere. `env.WEBHOOK_SECRET` is simply
+`undefined`, so every delivery is refused and Telegram reports only
+`Wrong response from the webhook: 403 Forbidden`. Step 5 catches it.
+
+⚠️ **Watch for a trailing newline** when pasting into the dashboard field. It is
+invisible and equally fatal. Step 5 catches that too.
+
 Then **Deploy** again. Bindings only take effect on a deploy.
 
 ## 5. Check it is alive
@@ -107,14 +123,27 @@ Then **Deploy** again. Bindings only take effect on a deploy.
 Note the Worker's URL from its page — something like
 `https://econ-briefing-bot.<your-subdomain>.workers.dev`.
 
-Visit **`<that URL>/health`** in your browser. You should see:
+Visit **`<that URL>/health`** in your browser. You want:
 
 ```json
-{"ok":true,"queued":0}
+{"ok":true,"queued":0,"config":{"BOT_TOKEN":true,"OWNER_CHAT_ID":true,
+ "WEBHOOK_SECRET":true,"DRAIN_SECRET":true,"LIST_URL":true,"QUEUE":true}}
 ```
 
-If you get an error instead, the usual cause is a missing `QUEUE` binding, or a
-deploy not done after adding it.
+**Every value in `config` must be `true`, and `ok` must be `true`.** This endpoint
+reports only whether each binding exists — never its value — because that is the
+one fault you cannot see from anywhere else:
+
+| what you see | what it means |
+|---|---|
+| `"missing":["WEBHOOK_SECRET"]` | misnamed or not added — see the warning in step 4 |
+| `"whitespace":["DRAIN_SECRET"]` | a stray newline or space got pasted in |
+| `"queueError":…` | the `QUEUE` binding is absent, misnamed, or you did not deploy after adding it |
+| `"queued":null` | same as above |
+| an error page, not JSON | the code did not deploy, or the URL is wrong |
+
+Do not go further until this is clean. Every later failure looks like a bare
+`403` and tells you nothing.
 
 ## 6. Point Telegram at it — from GitHub, not your browser
 
@@ -141,18 +170,29 @@ a secret and never prints it.
 Run it with `check` first if you want to see the current state — that changes
 nothing.
 
-## 7. Add the drain URL
-
-One more repository secret:
+## 7. Add the drain URL — LAST, and only now
 
 | secret | value |
 |---|---|
-| `TELEGRAM_DRAIN_URL` | your Worker URL, e.g. `https://econ-briefing-bot.….workers.dev` |
+| `TELEGRAM_DRAIN_URL` | your Worker URL, e.g. `https://econ-briefing-bot.….workers.dev` (no trailing slash, no `/telegram`) |
 
-`subscriptions.yml` switches from polling to draining the moment this exists.
-**Until you add it, people still get instant replies from the Worker, but
-`subscribers.json` stops moving** — the webhook has disabled `getUpdates`, so the
-polling path now finds nothing. So do not stop between steps 6 and 7.
+**This secret is the switch, not a setting.** `subscriptions.yml` stops polling
+and starts draining the moment it exists, so adding it before the Worker works
+deadlocks the whole thing: the poller skips `getUpdates`, the drain finds no
+Worker, and nothing is processed at all. Nothing is broken loudly — it just goes
+quiet.
+
+So the order matters in both directions:
+
+| state | result |
+|---|---|
+| Worker working, webhook pointed, secret added | correct |
+| secret added, Worker not working | **nothing processed at all** |
+| webhook pointed, secret missing | instant replies still work, `subscribers.json` frozen |
+| secret added, webhook not pointed | **nothing processed at all** |
+
+If you are unsure, delete `TELEGRAM_DRAIN_URL` and unpoint the webhook: that is
+the known-good polling configuration, and it works on its own.
 
 ## 8. Try it
 
