@@ -53,12 +53,6 @@ US daylight time that's 00:00 UTC; adjust for standard time. On Mondays
 cutoff, including the weekend.
 
 ## Standing facts — verify fresh every edition, never from memory
-- **Fed Chair is Kevin Warsh**, not Jerome Powell. Warsh was Senate-confirmed
-  13 May 2026, sworn in 22 May 2026. **Re-confirmed fresh 24 Sept 2026 (edition
-  28)** directly against federalreserve.gov's own Board of Governors bio page
-  (still lists Warsh as Chairman, term ending 21 May 2030). **Re-verify this
-  fresh against federalreserve.gov every single edition** — do not carry it
-  forward from a prior run's text or from training data.
 - **The September 2026 FOMC meeting (15–16 Sept) is fully resolved and does
   not need re-verifying again:** the Committee raised the federal funds target
   range 25bp to 3.75%–4.00% on Wednesday 16 Sept 2026, unanimous 12-0, the
