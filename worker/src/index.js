@@ -50,6 +50,19 @@ const MSG = {
 const START = new Set(["/start", "/subscribe"]);
 const STOP = new Set(["/stop", "/unsubscribe"]);
 
+// Bumped by hand whenever this file changes in a way worth confirming is live.
+// The Worker runs from code pasted into the dashboard, not from this repository,
+// so "did my paste actually deploy?" is otherwise unanswerable — and a stale
+// deploy looks exactly like a configuration fault.
+const VERSION = "2026-09-30a";
+
+// The subscriber list lives here, in KV, not in the repository. Chat IDs are
+// personal data and the repository is public; KV is private and already present
+// for the queue, so it costs nothing extra and needs no new credential.
+//
+// Deliberately not under the `q:` prefix, so listing the queue never picks it up.
+const LIST_KEY = "list";
+
 async function tg(env, method, body) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -83,22 +96,40 @@ async function enqueue(env, item, seq, n = 0) {
 }
 
 /**
- * The current list, read from the public repository. No credential needed — the
- * repo is public, which is what makes this cheap. Failure is not fatal: the
- * Worker falls back to answering without list context rather than going silent.
+ * The current list, from KV. Reports where it came from, because "did my
+ * migration land?" and "why is it answering as though nobody is subscribed?"
+ * are the same question asked from two directions, and only the source answers
+ * both. Failure is not fatal: the Worker answers without list context rather
+ * than going silent.
  */
-async function currentList(env) {
+async function storedList(env) {
+  // KV first — the authoritative home. LIST_URL is only a migration fallback,
+  // for the window between deploying this code and seeding KV; it also only
+  // works while the repository is public, which is the whole thing being fixed.
   try {
-    const r = await fetch(env.LIST_URL, { cf: { cacheTtl: 30 } });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return {
-      approved: new Set((d.approved || []).map((e) => e.chat_id)),
-      pending: (d.pending || []).map((e) => e.chat_id),
-    };
+    const raw = await env.QUEUE.get(LIST_KEY);
+    if (raw) return { source: "kv", list: JSON.parse(raw) };
   } catch {
-    return null;
+    /* fall through to the repository copy */
   }
+  if (env.LIST_URL) {
+    try {
+      const r = await fetch(env.LIST_URL, { cf: { cacheTtl: 30 } });
+      if (r.ok) return { source: "git", list: await r.json() };
+    } catch {
+      /* nothing readable */
+    }
+  }
+  return { source: "empty", list: null };
+}
+
+async function currentList(env) {
+  const { list } = await storedList(env);
+  if (!list) return null;
+  return {
+    approved: new Set((list.approved || []).map((e) => e.chat_id)),
+    pending: (list.pending || []).map((e) => e.chat_id),
+  };
 }
 
 const isOwner = (env, id) =>
@@ -274,15 +305,34 @@ export default {
         queueError = String((e && e.message) || e);
       }
 
+      // Where the list is read from is the one fact that says whether migration
+      // has happened. "git" means KV is still empty and the repository copy is
+      // being used — which stops working the moment the repo goes private.
+      const { source, list } = await storedList(env);
+
       return Response.json({
         ok: missing.length === 0 && untrimmed.length === 0 && queueError === null,
+        version: VERSION,
+        at: new Date().toISOString(),
         queued,
+        list: {
+          source,
+          approved: list ? (list.approved || []).length : null,
+          pending: list ? (list.pending || []).length : null,
+          unsubscribed: list ? (list.unsubscribed || []).length : null,
+        },
         config,
         ...(missing.length ? { missing } : {}),
         ...(untrimmed.length
           ? { whitespace: untrimmed, hint: "these have leading or trailing whitespace" }
           : {}),
         ...(queueError ? { queueError } : {}),
+      }, {
+        // A diagnostic that can be served from a cache is worse than none: it
+        // reports a state that may be minutes old and looks indistinguishable
+        // from the live one. `at` above is the second check — if it does not
+        // move between reloads, something is caching regardless.
+        headers: { "cache-control": "no-store, max-age=0" },
       });
     }
 
@@ -336,6 +386,48 @@ export default {
         if (v) items.push(JSON.parse(v));
       }
       return Response.json({ items });
+    }
+
+    // The subscriber list. GET hands it to a workflow, PUT takes it back after
+    // that workflow has applied the queue to it. Both are DRAIN_SECRET-protected:
+    // this is the personal data the whole change exists to keep out of a public
+    // repository, so it must never be readable without the secret.
+    if (url.pathname === "/list" && request.method === "GET") {
+      if (!auth("DRAIN_SECRET")) return new Response("forbidden", { status: 403 });
+      const { source, list } = await storedList(env);
+      return Response.json({ source, list }, {
+        headers: { "cache-control": "no-store, max-age=0" },
+      });
+    }
+
+    if (url.pathname === "/list" && request.method === "PUT") {
+      if (!auth("DRAIN_SECRET")) return new Response("forbidden", { status: 403 });
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      // Refuse anything that is not recognisably a list. Writing garbage here
+      // would lose every subscriber at once, and the caller is a shell script
+      // whose upstream steps can fail in ways that still produce output.
+      const list = body && body.list !== undefined ? body.list : body;
+      const shaped = list && Array.isArray(list.approved) && Array.isArray(list.pending);
+      if (!shaped) {
+        return Response.json(
+          { ok: false, error: "expected an object with approved[] and pending[]" },
+          { status: 400 },
+        );
+      }
+      await env.QUEUE.put(LIST_KEY, JSON.stringify(list));
+      return Response.json({
+        ok: true,
+        stored: {
+          approved: list.approved.length,
+          pending: list.pending.length,
+          unsubscribed: (list.unsubscribed || []).length,
+        },
+      });
     }
 
     if (url.pathname === "/ack" && request.method === "POST") {

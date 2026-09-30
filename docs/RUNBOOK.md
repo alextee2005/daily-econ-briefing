@@ -96,7 +96,22 @@ Two places, on purpose:
 | recipient | stored in | visibility |
 |---|---|---|
 | the owner | `TELEGRAM_CHAT_ID` secret | private |
-| everyone else | `subscribers.json`, `approved` list | **public — this repo is public** |
+| everyone else | the Worker's Cloudflare KV | private |
+
+**The list is not in this repository.** Chat IDs are personal data and this
+repository is public, so committing them published them. They live in the KV
+namespace the Worker already uses for its queue: private, no new credential, read
+and written with the same `DRAIN_SECRET`. `subscribers.json` is gitignored;
+workflows fetch it to that path at run time and must never commit it.
+
+That makes **the Worker required**. A polling-only setup has nowhere to keep the
+list, and a copy in git would undo the point, so `subscriptions.yml` fails loudly
+rather than treating an unreachable Worker as "nobody is subscribed".
+`deliver.yml` is the one exception: it degrades to owner-only with a warning,
+because a briefing that reaches you beats no briefing.
+
+Two ids — `702837256` and `870201856` — were committed before this change and
+remain in the public history. See *Purging the old ids* below.
 
 `deliver.yml` sends to the owner first, then to every approved subscriber. It
 uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
@@ -220,6 +235,45 @@ outright, whatever the list says.
 
 A failed poll never fails anything else: an unreachable Telegram, a rejected
 token or a garbage response each log a warning and exit 0.
+
+### Purging the old ids
+
+`702837256` and `870201856` are in this repository's history from before the list
+moved to KV. Deleting the file did not unpublish them, and a Telegram chat ID
+cannot be rotated — only abandoned with the account.
+
+Removing them means rewriting history and force-pushing `main`. Read the whole of
+this before starting.
+
+**What it costs.** Every existing clone and fork diverges. `main` is also pushed
+to by the briefing pipeline, so a run in flight will conflict. Anyone who already
+cloned still has the ids. This reduces casual discoverability; it does not undo
+exposure.
+
+**What it does not need.** Nothing else in the pipeline depends on those commits,
+so no workflow or secret changes.
+
+The steps, from a machine with a clone and `git-filter-repo` installed:
+
+1. **Stop the pipeline.** Disable **Answer the Telegram bot** and **Daily
+   Economic Briefing** in the Actions tab, and pause both Routines, so nothing
+   pushes while you work.
+2. **Back up.** `git clone --mirror` the repository somewhere else, and
+   `curl "<worker>/list?secret=<DRAIN_SECRET>" > backup.json`.
+3. **Confirm the list is in KV**, not just in git: `<worker>/health` must show
+   `"list":{"source":"kv"`. If it says `git`, migrate first — otherwise this
+   deletes the only copy.
+4. **Rewrite:** `git filter-repo --path subscribers.json --invert-paths`
+5. **Check:** `git log --all -p -- subscribers.json` prints nothing, and
+   `git log --all -S 870201856 --oneline` finds nothing.
+6. **Force-push:** `git push --force --all && git push --force --tags`
+7. **Re-enable** the workflows and Routines, and run **Answer the Telegram bot**
+   once by hand to confirm it still reads the list from KV.
+8. **Ask GitHub Support to purge cached views** if it matters — rewritten commits
+   can stay reachable by SHA through the API and forks until they do.
+
+If any of that reads as more risk than the exposure of two ids you control,
+leaving them is a defensible choice. Nothing else in the design depends on it.
 
 ### What the bot says
 

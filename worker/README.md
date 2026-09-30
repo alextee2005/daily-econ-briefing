@@ -87,7 +87,24 @@ Worker's page → **Settings**.
 
 The variable name must be exactly `QUEUE` — that is what the code looks for.
 
-**Under Variables and Secrets** → **Add**, four times:
+**Under Variables and Secrets** → **Add**, five times.
+
+⚠️ **Use *Variables and Secrets*, not *Build variables*.** The dashboard has two
+places that look equivalent and are not:
+
+| where | visible to the Worker at runtime? |
+|---|---|
+| Settings → **Variables and Secrets** | ✅ yes — the one you want |
+| Settings → **Build** → *Build variables and secrets* | ❌ no — build-time only |
+
+Adding them in the wrong place saves without any complaint and leaves every one
+of them `undefined` at runtime. The symptom is a bare `403 Forbidden` on every
+Telegram delivery, because the secret comparison can never succeed. Step 5 shows
+this as `"missing"` listing all of them while `QUEUE` stays `true` — the binding
+is configured elsewhere and is unaffected.
+
+⚠️ **Press Deploy afterwards.** The dashboard stages these changes and discards
+them if you navigate away.
 
 | Variable name | Type | Value |
 |---|---|---|
@@ -95,7 +112,7 @@ The variable name must be exactly `QUEUE` — that is what the code looks for.
 | `OWNER_CHAT_ID` | **Secret** | your chat id, same as `TELEGRAM_CHAT_ID` |
 | `WEBHOOK_SECRET` | **Secret** | the first random string |
 | `DRAIN_SECRET` | **Secret** | the second random string |
-| `LIST_URL` | Text | `https://raw.githubusercontent.com/alextee2005/daily-econ-briefing/main/subscribers.json` |
+| `LIST_URL` | Text | `https://raw.githubusercontent.com/alextee2005/daily-econ-briefing/main/subscribers.json` — **migration fallback only, safe to delete once migrated** |
 
 Choose **Secret** (encrypted) for the first four so they cannot be read back.
 `LIST_URL` is plain text — it is a public URL.
@@ -141,6 +158,14 @@ one fault you cannot see from anywhere else:
 | `"queueError":…` | the `QUEUE` binding is absent, misnamed, or you did not deploy after adding it |
 | `"queued":null` | same as above |
 | an error page, not JSON | the code did not deploy, or the URL is wrong |
+| no `version` field at all | you are running older code — the paste in step 3 did not deploy |
+| `at` identical across two reloads | something is caching the reply; add `?x=1` to the URL |
+
+The `version` field is the answer to "is my paste actually live?". The Worker runs
+from code pasted into the dashboard, not from this repository, so a stale deploy
+looks exactly like a configuration fault. If `version` is missing or older than
+the `VERSION` constant at the top of `src/index.js`, fix that before reading
+anything else on the page.
 
 Do not go further until this is clean. Every later failure looks like a bare
 `403` and tells you nothing.
@@ -271,3 +296,136 @@ and since the last decision in a batch wins, a `/stop` could be applied before
 the `/start` it followed, leaving somebody subscribed after asking to leave. The
 key is now Telegram's `update_id`, which is monotonic, and which also makes
 enqueueing idempotent under Telegram's own retries.
+
+---
+
+# Migrating the subscriber list into KV
+
+The list used to be committed as `subscribers.json`. Chat IDs are personal data
+and this repository is public, so it now lives in the Worker's KV instead —
+private, already present for the queue, and needing no new credential.
+
+**This makes the Worker required.** A polling-only setup has nowhere to keep the
+list, and putting a copy back in git would undo the point. `subscriptions.yml`
+now fails loudly rather than quietly treating an unreachable Worker as "nobody is
+subscribed".
+
+## What you have to do, in order
+
+All of it in the browser. **Do these before merging the change that deletes
+`subscribers.json`** — that file is where you copy the list from.
+
+### 1. Re-paste and deploy the Worker
+
+`worker/src/index.js` → the Worker's **Edit code** → replace everything →
+**Deploy**.
+
+Check `<your-worker>/health`. You want the new version, and `source: "git"`:
+
+```json
+{"version":"2026-09-30a","list":{"source":"git","approved":2,...}}
+```
+
+`source: "git"` is **correct at this stage** — KV is still empty, so the Worker is
+reading the repository copy. If `version` is missing or older than
+`2026-09-30a`, the paste did not deploy; fix that before going on.
+
+### 2. Copy the current list
+
+Open `subscribers.json` on GitHub and press **Raw**, then select all and copy.
+Keep the whole JSON object, including the outer `{` and `}`.
+
+The `_comment` field is harmless to keep or drop. What matters is that
+`approved`, `pending` and `unsubscribed` survive exactly.
+
+### 3. Paste it into KV
+
+Cloudflare dashboard → **Storage & Databases** → **KV** → click your namespace
+(`econ-briefing-queue`). On older accounts this is under **Workers & Pages** →
+**KV** → the namespace's **View** button.
+
+Add an entry:
+
+| field | value |
+|---|---|
+| **Key** | `list` |
+| **Value** | the JSON you copied in step 2 |
+
+Then **Add entry** / **Save**.
+
+Three things that will silently break this:
+
+- **The key must be exactly `list`** — lower case, no spaces, no `q:` prefix. The
+  Worker looks for that one name, and the `q:` prefix is the queue's.
+- **Do not wrap it.** Paste the list object itself, not
+  `{"list": {...}}` — that shape is only what the HTTP API accepts.
+- Leading or trailing whitespace is fine; a missing brace is not. If the value is
+  not valid JSON the Worker silently falls back to the repository copy, which
+  looks like nothing happened.
+
+### 4. Confirm KV is now the source
+
+Reload `<your-worker>/health`. You need:
+
+```json
+"list":{"source":"kv","approved":2,"pending":0,"unsubscribed":0}
+```
+
+**`source` must say `kv`, and the counts must match what you pasted.** KV is
+eventually consistent, so give it up to a minute and reload.
+
+If it still says `git`, the key name is wrong or the value is not valid JSON —
+those are the only two causes. Do not continue until this reads `kv`: the next
+step deletes the other copy.
+
+### 5. Merge the change that deletes `subscribers.json`
+
+It is gitignored from now on. Workflows fetch it to that path at run time and
+must never commit it again.
+
+### 6. Optional — delete `LIST_URL` from the Worker
+
+Settings → Variables and Secrets → remove `LIST_URL` → **Deploy**. Once KV holds
+the list it is never read, and removing it is what makes the repository's
+visibility irrelevant to the Worker.
+
+### If you would rather not use the dashboard
+
+Actions → **Answer the Telegram bot** → Run workflow → tick **seed** does steps
+2–4 in one go: it copies the committed list into KV, reads it back, and fails if
+they differ. It prints counts only, never ids. The dashboard path above is
+equivalent and keeps the list out of a workflow log entirely.
+
+## Verifying it end to end
+
+Send `/start` from a test account, approve it, and within five minutes
+`<worker>/health` should show `approved` incremented — with **no commit** to the
+repository. That absence is the point.
+
+## Rolling back
+
+`GET <worker>/list?secret=<DRAIN_SECRET>` returns the list. Commit its `list`
+field back to `subscribers.json`, revert this change, and the old behaviour
+returns. Keep a copy before you start if that matters to you:
+
+```
+curl "<worker>/list?secret=<DRAIN_SECRET>" > backup.json
+```
+
+## What this does not fix
+
+**The ids already in git history stay there.** `702837256` and `870201856` were
+committed before this change and remain in the history of a public repository.
+Deleting the file going forward does not unpublish them, and a Telegram chat ID
+cannot be rotated — only abandoned along with the account.
+
+Purging them requires rewriting history and force-pushing `main`, which the
+briefing pipeline also pushes to. It reduces casual discoverability; it does not
+undo exposure for anyone who already has a clone. The manual steps are in
+`docs/RUNBOOK.md` under *Purging the old ids*.
+
+## The one operational cost
+
+The list's only home is now Cloudflare. If you delete that KV namespace it is
+gone, and the recovery is to ask people to `/start` again. `GET /list` is a
+one-line backup; taking one occasionally is cheap insurance.

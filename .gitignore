@@ -9,3 +9,8 @@ package-lock.json
 # Python
 __pycache__/
 *.pyc
+
+# The subscriber list is personal data and this repository is public, so it lives
+# in the Worker's Cloudflare KV instead. Workflows fetch it to this path at run
+# time; it must never be committed again. See worker/README.md.
+subscribers.json

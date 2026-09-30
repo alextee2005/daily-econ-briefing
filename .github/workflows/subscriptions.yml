@@ -1,40 +1,47 @@
 name: Answer the Telegram bot
 
-# Keeps subscribers.json in step with what people have asked the bot for.
+# Keeps the subscriber list in step with what people have asked the bot for.
 #
-# TWO WAYS TO HEAR, AND THIS PICKS ONE AT RUN TIME
+# WHERE THE LIST LIVES
+# In Cloudflare KV, reached through the Worker — NOT in this repository. Chat IDs
+# are personal data and this repository is public, so committing them published
+# them. KV is private, already present for the queue, and needs no new
+# credential: the same DRAIN_SECRET that reads the queue reads and writes the
+# list.
 #
-#   webhook  A Cloudflare Worker (worker/) holds Telegram's webhook and answers
-#            everyone in milliseconds, queueing what it decided. This workflow
-#            drains that queue and commits. Latency for the PERSON is instant;
-#            this run only settles the bookkeeping.
-#   polling  No Worker deployed. This workflow asks getUpdates itself. Replies
-#            then wait for the next run, so five to fifteen minutes.
+# That makes the Worker REQUIRED rather than an optimisation. A polling-only
+# configuration has nowhere to keep the list, and putting a copy back in git to
+# support it would undo the privacy this exists for. If the Worker cannot be
+# reached, this workflow fails loudly instead of quietly operating on an empty
+# list and appearing to unsubscribe everybody.
 #
-# Setting a Telegram webhook DISABLES getUpdates — Telegram allows one or the
-# other — so this is a switch, not an addition. The switch is the presence of the
-# TELEGRAM_DRAIN_URL secret, tested inside a step rather than in an `if:`,
-# because the `secrets` context is not available to step conditions and the
-# condition would silently never fire.
+# TWO WAYS TO HEAR
+#   webhook  The Worker holds Telegram's webhook, answers everyone in
+#            milliseconds, and queues what it decided. This drains that queue.
+#   polling  No webhook pointed. This asks getUpdates itself and replies from
+#            here, so replies wait for the next run.
+# A webhook and getUpdates are mutually exclusive, so which applies is decided by
+# whether a webhook is pointed — see telegram-webhook.yml.
 #
-# WHY NOT A CLAUDE ROUTINE
-# GitHub's cron is unreliable, which is fatal for producing an edition and
-# harmless here: a dropped run delays bookkeeping, and under the webhook the
-# person has already been answered. It also costs no model tokens, where a
-# Routine at this cadence would be roughly $0.43 a time.
+# WHY GITHUB'S CRON AND NOT A ROUTINE
+# A dropped run delays bookkeeping; under the webhook the person has already been
+# answered. It also costs no model tokens, where a Routine at this cadence would
+# be roughly $0.43 a time.
 
 on:
   schedule:
-    # Every five minutes, GitHub's shortest allowed interval. Expect it to be
-    # late and to skip; what matters is that it runs often.
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      seed:
+        description: "MIGRATION ONLY: copy the list committed in git into KV, then stop"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write # record list changes in subscribers.json
+  contents: read # the list is no longer stored here, so nothing to write
 
 concurrency:
-  # Shared with find-chat-id.yml: both write subscribers.json.
   group: telegram-subscribers
   cancel-in-progress: false
 
@@ -49,8 +56,87 @@ jobs:
         with:
           python-version: "3.12"
 
+      # --- migration: one-off, seeds KV from the copy still in git -------------
+      - name: Seed KV from the committed list
+        if: inputs.seed
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+        run: |
+          set -uo pipefail
+          if [ -z "${DRAIN_URL:-}" ]; then
+            echo "::error::TELEGRAM_DRAIN_URL is not set; nothing to seed into."
+            exit 1
+          fi
+
+          # Prefer the working copy; fall back to git history so this still works
+          # after the file has been deleted from the repository.
+          if [ -f subscribers.json ]; then
+            cp subscribers.json /tmp/seed.json
+            echo "Seeding from the committed subscribers.json."
+          elif git show HEAD:subscribers.json > /tmp/seed.json 2>/dev/null; then
+            echo "File already deleted; seeding from git history at HEAD."
+          else
+            echo "::error::No subscribers.json in the checkout or at HEAD."
+            echo "::error::Pass a ref that still has it, or seed by hand — see"
+            echo "::error::worker/README.md."
+            exit 1
+          fi
+
+          # Counts only. Never echo the list: these logs are public.
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/seed.json'))
+          print(f\"  {len(d.get('approved') or [])} approved, \"
+                f\"{len(d.get('pending') or [])} pending, \"
+                f\"{len(d.get('unsubscribed') or [])} opted out\")
+          "
+
+          CODE=$(curl -sS -o /tmp/put.json -w '%{http_code}' \
+            -X PUT "${DRAIN_URL%/}/list?secret=${DRAIN_SECRET}" \
+            -H 'content-type: application/json' --data-binary @/tmp/seed.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::The Worker refused the list (HTTP ${CODE})."
+            python3 -c "
+          import json
+          try: print('::error::' + str(json.load(open('/tmp/put.json'))))
+          except Exception: pass
+          " || true
+            exit 1
+          fi
+          echo "Stored: $(cat /tmp/put.json)"
+
+          # Prove it round-tripped, so migration is verified rather than assumed.
+          curl -sS -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+            -o /tmp/back.json
+          python3 - <<'PY'
+          import json, sys
+          seed = json.load(open('/tmp/seed.json'))
+          back = json.load(open('/tmp/back.json'))
+          if back.get('source') != 'kv':
+              print(f"::error::After seeding, the Worker still reads from "
+                    f"{back.get('source')!r} rather than kv.")
+              sys.exit(1)
+          for key in ('approved', 'pending', 'unsubscribed'):
+              a = {e['chat_id'] for e in (seed.get(key) or [])}
+              b = {e['chat_id'] for e in (back['list'].get(key) or [])}
+              if a != b:
+                  print(f"::error::{key} differs after the round trip "
+                        f"({len(a)} in, {len(b)} out).")
+                  sys.exit(1)
+          print("Verified: KV now holds the list, and it matches what was sent.")
+          PY
+          {
+            echo "## Migration"
+            echo
+            echo "The subscriber list is now stored in Cloudflare KV and read from there."
+            echo "Next: merge the change that deletes \`subscribers.json\` from this"
+            echo "repository. Counts are in the log; the ids are deliberately not."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Decide how we are hearing from Telegram
         id: mode
+        if: '!inputs.seed'
         env:
           DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -59,15 +145,54 @@ jobs:
           if [ -z "${TOKEN:-}" ]; then
             echo "TELEGRAM_BOT_TOKEN is not set; nothing to do."
             echo "how=none" >> "$GITHUB_OUTPUT"
-          elif [ -n "${DRAIN_URL:-}" ]; then
-            echo "A webhook Worker is configured; draining its queue."
-            echo "how=webhook" >> "$GITHUB_OUTPUT"
-          else
-            echo "No Worker configured; polling getUpdates."
-            echo "how=poll" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [ -z "${DRAIN_URL:-}" ]; then
+            # Not a warning. The list lives in the Worker now, so without it this
+            # workflow cannot read who is subscribed, and carrying on would look
+            # like everybody had unsubscribed.
+            echo "::error::TELEGRAM_DRAIN_URL is not set, and the subscriber list"
+            echo "::error::now lives in the Worker's KV rather than in this repository."
+            echo "::error::Set it, or see worker/README.md to deploy the Worker."
+            exit 1
+          fi
+          echo "how=webhook" >> "$GITHUB_OUTPUT"
 
-      # --- webhook: the Worker already replied; settle the list -----------------
+      # --- the list comes from the Worker, in both modes -----------------------
+      - name: Fetch the subscriber list
+        id: fetch
+        if: steps.mode.outputs.how == 'webhook'
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+        run: |
+          set -uo pipefail
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/list.json; then
+            echo "::error::Could not reach the Worker to read the subscriber list."
+            exit 1
+          fi
+          # Unwrap {source, list} into the file scripts/subscribers.py reads, so
+          # every one of its tested code paths is unchanged by this move.
+          python3 - <<'PY'
+          import json, sys, pathlib
+          d = json.load(open('/tmp/list.json'))
+          src, lst = d.get('source'), d.get('list')
+          if lst is None:
+              print("::warning::The Worker holds no list yet. Treating it as empty —"
+                    " run this workflow with 'seed' if it should have been migrated.")
+              lst = {"approved": [], "pending": [], "unsubscribed": [], "last_update_id": 0}
+          print(f"list source: {src}; "
+                f"{len(lst.get('approved') or [])} approved, "
+                f"{len(lst.get('pending') or [])} pending")
+          if src == 'git':
+              print("::warning::Still reading the list from the repository copy. KV is"
+                    " empty — migration has not been done, and this stops working if"
+                    " the repository goes private.")
+          pathlib.Path('subscribers.json').write_text(json.dumps(lst, indent=2) + "\n")
+          PY
+
       - name: Drain the webhook queue
         id: drain
         if: steps.mode.outputs.how == 'webhook'
@@ -81,7 +206,7 @@ jobs:
           if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
                  -G "${DRAIN_URL%/}/queue" --data-urlencode "secret=${DRAIN_SECRET}" \
                  -o /tmp/queue.json; then
-            echo "::warning::Could not reach the Worker. Items stay queued for the next run."
+            echo "::warning::Could not reach the Worker. Items stay queued."
             exit 0
           fi
 
@@ -103,103 +228,33 @@ jobs:
             --updates /tmp/queue.json --replies /tmp/ack.json || exit 0
           echo "drained=yes" >> "$GITHUB_OUTPUT"
 
-      # --- polling fallback -----------------------------------------------------
-      - name: Ask Telegram what has arrived
-        id: poll
-        if: steps.mode.outputs.how == 'poll'
+      # --- store it back, then acknowledge, in that order ----------------------
+      - name: Store the updated list
+        id: store
+        if: steps.drain.outputs.drained == 'yes'
         env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
         run: |
           set -uo pipefail
-
-          OFFSET=$(python3 -c "
-          import json, pathlib
-          p = pathlib.Path('subscribers.json')
-          d = json.loads(p.read_text()) if p.is_file() else {}
-          print(int(d.get('last_update_id') or 0) + 1)
-          " 2>/dev/null || echo 1)
-          echo "Asking for updates from offset ${OFFSET}."
-
-          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
-                 -G "https://api.telegram.org/bot${TOKEN}/getUpdates" \
-                 --data-urlencode "offset=${OFFSET}" \
-                 --data-urlencode "timeout=0" \
-                 -o /tmp/upd.json; then
-            echo "::warning::Could not reach Telegram."
-            exit 0
+          CODE=$(curl -sS -o /tmp/put.json -w '%{http_code}' \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            -X PUT "${DRAIN_URL%/}/list?secret=${DRAIN_SECRET}" \
+            -H 'content-type: application/json' --data-binary @subscribers.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::The Worker refused the updated list (HTTP ${CODE})."
+            echo "::error::The queue is NOT acknowledged, so the next run replays it."
+            exit 1
           fi
-
-          # stderr dropped: a 502 HTML body raises a traceback that says nothing
-          # the warning does not, and these logs are public.
-          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('/tmp/upd.json')).get('ok') else 1)" 2>/dev/null; then
-            echo "::warning::Telegram rejected getUpdates. Check the bot token."
-            exit 0
-          fi
-
-          COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/upd.json')).get('result') or []))")
-          echo "${COUNT} update(s) waiting."
-          # Most polls find nothing; skip the rest so the run is a few seconds.
-          if [ "$COUNT" != "0" ]; then echo "found=yes" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Act on what arrived
-        if: steps.poll.outputs.found == 'yes'
-        env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -uo pipefail
-          python3 scripts/subscribers.py process \
-            --updates /tmp/upd.json --replies /tmp/replies.json || exit 0
-          TELEGRAM_BOT_TOKEN="$TOKEN" bash scripts/send_replies.sh /tmp/replies.json
-
-      # --- commit, then acknowledge, in that order -----------------------------
-      - name: Record what changed
-        id: record
-        if: steps.drain.outputs.drained == 'yes' || steps.poll.outputs.found == 'yes'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet -- subscribers.json; then
-            echo "subscribers.json unchanged."
-            echo "committed=yes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git add -- subscribers.json
-          SUMMARY=$(python3 -c "
-          import json
-          d = json.load(open('subscribers.json'))
-          print(f\"{len(d['approved'])} approved, {len(d['pending'])} pending, \"
-                f\"{len(d['unsubscribed'])} opted out\")
-          ")
-          git commit -m "Update briefing subscribers" -m "${SUMMARY}"
-
-          # The briefing pushes to main several times a week and this runs every
-          # five minutes, so being behind is the normal case. Rebase and retry.
-          for attempt in 1 2 3; do
-            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
-               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
-              echo "committed=yes" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::warning::Push attempt ${attempt} lost a race; retrying."
-            sleep $(( attempt * 5 ))
-          done
-          echo "::error::Could not record the change after three attempts."
-          exit 1
+          echo "Stored: $(cat /tmp/put.json)"
+          echo "stored=yes" >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge the queue
-        # Strictly after a successful commit. Acknowledging earlier would delete
-        # a decision that never landed, which is how an opt-out disappears
+        # Strictly after a successful store. Acknowledging earlier would delete a
+        # decision that never landed, which is how an opt-out disappears
         # silently; acknowledging later at worst replays an item, and
         # apply_queue() is idempotent precisely so that replay is harmless.
-        if: steps.drain.outputs.drained == 'yes' && steps.record.outputs.committed == 'yes'
+        if: steps.store.outputs.stored == 'yes'
         env:
           DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
           DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
@@ -210,8 +265,8 @@ jobs:
                  -X POST "${DRAIN_URL%/}/ack?secret=${DRAIN_SECRET}" \
                  -H 'content-type: application/json' \
                  -d "{\"ids\": $(cat /tmp/ack.json)}" -o /tmp/ack_resp.json; then
-            echo "::warning::Committed, but could not acknowledge the queue."
-            echo "::warning::The next run will replay these ${N} item(s); applying them"
+            echo "::warning::Stored, but could not acknowledge the queue."
+            echo "::warning::The next run replays these ${N} item(s); applying them"
             echo "::warning::again is a no-op, so nothing is lost or duplicated."
             exit 0
           fi
