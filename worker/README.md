@@ -112,7 +112,7 @@ them if you navigate away.
 | `OWNER_CHAT_ID` | **Secret** | your chat id, same as `TELEGRAM_CHAT_ID` |
 | `WEBHOOK_SECRET` | **Secret** | the first random string |
 | `DRAIN_SECRET` | **Secret** | the second random string |
-| `LIST_URL` | Text | `https://raw.githubusercontent.com/alextee2005/daily-econ-briefing/main/subscribers.json` |
+| `LIST_URL` | Text | `https://raw.githubusercontent.com/alextee2005/daily-econ-briefing/main/subscribers.json` — **migration fallback only, safe to delete once migrated** |
 
 Choose **Secret** (encrypted) for the first four so they cannot be read back.
 `LIST_URL` is plain text — it is a public URL.
@@ -296,3 +296,85 @@ and since the last decision in a batch wins, a `/stop` could be applied before
 the `/start` it followed, leaving somebody subscribed after asking to leave. The
 key is now Telegram's `update_id`, which is monotonic, and which also makes
 enqueueing idempotent under Telegram's own retries.
+
+---
+
+# Migrating the subscriber list into KV
+
+The list used to be committed as `subscribers.json`. Chat IDs are personal data
+and this repository is public, so it now lives in the Worker's KV instead —
+private, already present for the queue, and needing no new credential.
+
+**This makes the Worker required.** A polling-only setup has nowhere to keep the
+list, and putting a copy back in git would undo the point. `subscriptions.yml`
+now fails loudly rather than quietly treating an unreachable Worker as "nobody is
+subscribed".
+
+## What you have to do, in order
+
+**1. Re-paste and deploy the Worker.** `worker/src/index.js` → the dashboard
+editor → Deploy. Then check `<worker>/health`:
+
+```json
+{"version":"2026-09-30a","list":{"source":"git","approved":1,...}}
+```
+
+`source: "git"` is expected at this point — KV is still empty, so it is reading
+the repository copy. If `version` is older than `2026-09-30a`, the paste did not
+deploy; fix that first.
+
+**2. Seed KV from the committed list.** Actions → **Answer the Telegram bot** →
+Run workflow → tick **seed**.
+
+It copies the committed list into KV, reads it back, and fails if the two do not
+match. It prints **counts only** — the ids never enter the log, which is public.
+
+**3. Confirm.** Reload `<worker>/health`. You want:
+
+```json
+"list":{"source":"kv","approved":N,...}
+```
+
+`source: "kv"` means migration is done. Until it says that, do not go on.
+
+**4. Merge the change that deletes `subscribers.json`.** It is now in
+`.gitignore`; workflows fetch it to that path at run time and must never commit
+it again.
+
+**5. Optional: delete `LIST_URL`** from the Worker's variables. Once KV holds the
+list it is never read, and removing it is what makes the repository's visibility
+irrelevant.
+
+## Verifying it end to end
+
+Send `/start` from a test account, approve it, and within five minutes
+`<worker>/health` should show `approved` incremented — with **no commit** to the
+repository. That absence is the point.
+
+## Rolling back
+
+`GET <worker>/list?secret=<DRAIN_SECRET>` returns the list. Commit its `list`
+field back to `subscribers.json`, revert this change, and the old behaviour
+returns. Keep a copy before you start if that matters to you:
+
+```
+curl "<worker>/list?secret=<DRAIN_SECRET>" > backup.json
+```
+
+## What this does not fix
+
+**The ids already in git history stay there.** `702837256` and `870201856` were
+committed before this change and remain in the history of a public repository.
+Deleting the file going forward does not unpublish them, and a Telegram chat ID
+cannot be rotated — only abandoned along with the account.
+
+Purging them requires rewriting history and force-pushing `main`, which the
+briefing pipeline also pushes to. It reduces casual discoverability; it does not
+undo exposure for anyone who already has a clone. The manual steps are in
+`docs/RUNBOOK.md` under *Purging the old ids*.
+
+## The one operational cost
+
+The list's only home is now Cloudflare. If you delete that KV namespace it is
+gone, and the recovery is to ask people to `/start` again. `GET /list` is a
+one-line backup; taking one occasionally is cheap insurance.

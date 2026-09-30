@@ -70,6 +70,54 @@ jobs:
           echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
           echo "Selected: $PDF (${SIZE_MB}MB)"
 
+      - name: Fetch the subscriber list
+        # The list lives in Cloudflare KV, not in this repository — chat IDs are
+        # personal data and this repository is public. Fetched here so that
+        # scripts/subscribers.py still just reads a local file, keeping all of its
+        # tested code paths unchanged.
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+        run: |
+          set -uo pipefail
+
+          # Deliberately never fatal. A briefing that reaches the owner is far
+          # better than no briefing, so every failure here degrades to owner-only
+          # and says so loudly rather than stopping the delivery.
+          warn_owner_only() {
+            echo "::warning::$1"
+            echo "::warning::Delivering to the owner only. Subscribers will NOT receive"
+            echo "::warning::this edition. Fix before the next one."
+            rm -f subscribers.json
+          }
+
+          if [ -z "${DRAIN_URL:-}" ]; then
+            warn_owner_only "TELEGRAM_DRAIN_URL is not set, so the subscriber list cannot be read."
+            exit 0
+          fi
+
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/list.json; then
+            warn_owner_only "Could not reach the Worker to read the subscriber list."
+            exit 0
+          fi
+
+          python3 - <<'PY' || exit 0
+          import json, pathlib, sys
+          try:
+              d = json.load(open('/tmp/list.json'))
+          except Exception as exc:
+              print(f"::warning::The Worker's reply was not readable JSON: {exc}")
+              print("::warning::Delivering to the owner only.")
+              pathlib.Path('subscribers.json').unlink(missing_ok=True)
+              sys.exit(0)
+          lst = d.get('list') or {"approved": [], "pending": [], "unsubscribed": []}
+          n = len(lst.get('approved') or [])
+          print(f"list source: {d.get('source')}; {n} approved subscriber(s)")
+          pathlib.Path('subscribers.json').write_text(json.dumps(lst, indent=2) + "\n")
+          PY
+
       - name: Send to every recipient
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

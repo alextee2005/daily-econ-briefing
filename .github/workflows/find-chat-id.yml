@@ -38,7 +38,7 @@ on:
         default: ""
 
 permissions:
-  contents: write # record newly-seen chats in subscribers.json
+  contents: read # the list lives in the Worker's KV, not here
 
 concurrency:
   group: telegram-subscribers
@@ -53,6 +53,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Fetch the subscriber list
+        # It lives in Cloudflare KV, not in this repository: chat IDs are personal
+        # data and this repository is public. Written to a local file so that
+        # scripts/subscribers.py is unchanged by the move.
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+        run: |
+          set -uo pipefail
+          if [ -z "${DRAIN_URL:-}" ]; then
+            echo "::error::TELEGRAM_DRAIN_URL is not set. The subscriber list lives in"
+            echo "::error::the Worker's KV now — see worker/README.md."
+            exit 1
+          fi
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/list.json; then
+            echo "::error::Could not reach the Worker to read the subscriber list."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, pathlib
+          d = json.load(open('/tmp/list.json'))
+          lst = d.get('list') or {"approved": [], "pending": [], "unsubscribed": [],
+                                  "last_update_id": 0}
+          print(f"list source: {d.get('source')}")
+          pathlib.Path('subscribers.json').write_text(json.dumps(lst, indent=2) + "\n")
+          PY
 
       - name: Apply approvals and removals
         if: inputs.approve != '' || inputs.remove != ''
@@ -107,30 +136,22 @@ jobs:
 
           python3 scripts/subscribers.py sync --updates /tmp/upd.json
 
-      - name: Record any new chats
+      - name: Store the updated list
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
         run: |
-          set -euo pipefail
-
-          if git diff --quiet -- subscribers.json; then
-            echo "subscribers.json unchanged — nothing to commit."
-            exit 0
+          set -uo pipefail
+          CODE=$(curl -sS -o /tmp/put.json -w '%{http_code}' \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            -X PUT "${DRAIN_URL%/}/list?secret=${DRAIN_SECRET}" \
+            -H 'content-type: application/json' --data-binary @subscribers.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::The Worker refused the updated list (HTTP ${CODE})."
+            echo "::error::Nothing has changed. Check TELEGRAM_DRAIN_SECRET."
+            exit 1
           fi
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          git add -- subscribers.json
-          git commit -m "Update briefing subscribers" \
-            -m "Recorded from a Find my Telegram chat ID run."
-
-          # The briefing pipeline pushes to main several times a week, so this
-          # may well be behind by the time it runs.
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "Stored: $(cat /tmp/put.json)"
 
       - name: Show the current delivery list
         if: always()

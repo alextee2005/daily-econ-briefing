@@ -255,6 +255,104 @@ const queued = async (env) => {
   expect("and the queue is then empty", (await queued(env)).length, 0);
 }
 
+// --- the subscriber list lives in KV, not in the repository --------------------
+// Chat IDs are personal data and the repository is public. These cases cover the
+// endpoints a workflow uses to read the list, apply the queue to it, and put it
+// back — and that it is never readable without the secret, which is the entire
+// point of moving it.
+{
+  const env = harness();
+  const listJson = {
+    approved: [{ chat_id: FRIEND, type: "private", added: "2026-09-30" }],
+    pending: [], unsubscribed: [], last_update_id: 0,
+  };
+
+  const noSecret = await worker.fetch(new Request("https://w.test/list?secret=nope"), env);
+  expect("the list is not readable without the secret", noSecret.status, 403);
+
+  const noSecretPut = await worker.fetch(new Request("https://w.test/list?secret=nope", {
+    method: "PUT", body: JSON.stringify(listJson),
+  }), env);
+  expect("and not writable without it", noSecretPut.status, 403);
+
+  const put = await worker.fetch(new Request("https://w.test/list?secret=drain", {
+    method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify(listJson),
+  }), env);
+  expect("storing the list reports what it stored",
+    await put.json(), { ok: true, stored: { approved: 1, pending: 0, unsubscribed: 0 } });
+
+  const got = await worker.fetch(new Request("https://w.test/list?secret=drain"), env);
+  const body = await got.json();
+  expect("reading it back is lossless", [body.source, body.list], ["kv", listJson]);
+  expect("the list is never cached",
+    got.headers.get("cache-control"), "no-store, max-age=0");
+
+  // Once KV holds the list, the Worker must stop consulting the repository — that
+  // is what makes the repo's visibility irrelevant.
+  let fetchedGit = false;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, i) => { if (String(u).includes("/list.json")) fetchedGit = true;
+                                       return realFetch(u, i); };
+  await hook(env, msg(FRIEND, "/start"));
+  expect("an approved subscriber is recognised from KV, without touching the repo",
+    [sent[0].body.text, fetchedGit],
+    ["You are already subscribed. Send /stop to unsubscribe.", false]);
+}
+{
+  // Garbage must be refused. The caller is a shell script whose upstream steps
+  // can fail while still producing output, and writing that would lose every
+  // subscriber at once.
+  const env = harness();
+  for (const [label, payload] of [
+    ["a bare string", '"nope"'],
+    ["an object with no arrays", '{"approved":1,"pending":2}'],
+    ["approved missing", '{"pending":[]}'],
+    ["empty body", ""],
+  ]) {
+    const r = await worker.fetch(new Request("https://w.test/list?secret=drain", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: payload,
+    }), env);
+    expect(`PUT /list refuses ${label}`, r.status >= 400, true);
+  }
+  // Nothing reached KV. GET still answers, because it falls back to the
+  // repository copy during migration — so the property to assert is the source,
+  // not that the list is empty.
+  const still = await (await worker.fetch(new Request("https://w.test/list?secret=drain"), env)).json();
+  expect("and none of them reached KV", still.source === "kv", false);
+}
+{
+  // A workflow may PUT either the bare list or {list: …}; accept both so the
+  // shell does not have to reshape what GET handed it.
+  const env = harness();
+  const wrapped = { list: { approved: [], pending: [{ chat_id: 9, type: "private" }],
+                            unsubscribed: [] } };
+  const r = await worker.fetch(new Request("https://w.test/list?secret=drain", {
+    method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify(wrapped),
+  }), env);
+  expect("PUT accepts the wrapped shape GET returns",
+    (await r.json()).stored.pending, 1);
+}
+{
+  // Migration window: KV empty, repository copy still readable.
+  const env = harness({ approved: [FRIEND] });
+  const body = await (await worker.fetch(new Request("https://w.test/list?secret=drain"), env)).json();
+  expect("with KV empty it falls back to the repository copy", body.source, "git");
+
+  const h = await (await worker.fetch(new Request("https://w.test/health"), env)).json();
+  expect("health says which source is in use, so migration is checkable",
+    [h.list.source, h.list.approved], ["git", 1]);
+}
+{
+  // And with neither, it says so rather than pretending the list is empty.
+  const env = harness();
+  delete env.LIST_URL;
+  const body = await (await worker.fetch(new Request("https://w.test/list?secret=drain"), env)).json();
+  expect("with nothing configured the source is empty", [body.source, body.list],
+    ["empty", null]);
+}
+
 // --- ordering, which a random key suffix used to scramble ----------------------
 // Two decisions in the same millisecond must still apply in the order they
 // happened: the last one wins, so getting this wrong could leave somebody
