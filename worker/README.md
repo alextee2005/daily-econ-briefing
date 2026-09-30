@@ -312,38 +312,89 @@ subscribed".
 
 ## What you have to do, in order
 
-**1. Re-paste and deploy the Worker.** `worker/src/index.js` → the dashboard
-editor → Deploy. Then check `<worker>/health`:
+All of it in the browser. **Do these before merging the change that deletes
+`subscribers.json`** — that file is where you copy the list from.
+
+### 1. Re-paste and deploy the Worker
+
+`worker/src/index.js` → the Worker's **Edit code** → replace everything →
+**Deploy**.
+
+Check `<your-worker>/health`. You want the new version, and `source: "git"`:
 
 ```json
-{"version":"2026-09-30a","list":{"source":"git","approved":1,...}}
+{"version":"2026-09-30a","list":{"source":"git","approved":2,...}}
 ```
 
-`source: "git"` is expected at this point — KV is still empty, so it is reading
-the repository copy. If `version` is older than `2026-09-30a`, the paste did not
-deploy; fix that first.
+`source: "git"` is **correct at this stage** — KV is still empty, so the Worker is
+reading the repository copy. If `version` is missing or older than
+`2026-09-30a`, the paste did not deploy; fix that before going on.
 
-**2. Seed KV from the committed list.** Actions → **Answer the Telegram bot** →
-Run workflow → tick **seed**.
+### 2. Copy the current list
 
-It copies the committed list into KV, reads it back, and fails if the two do not
-match. It prints **counts only** — the ids never enter the log, which is public.
+Open `subscribers.json` on GitHub and press **Raw**, then select all and copy.
+Keep the whole JSON object, including the outer `{` and `}`.
 
-**3. Confirm.** Reload `<worker>/health`. You want:
+The `_comment` field is harmless to keep or drop. What matters is that
+`approved`, `pending` and `unsubscribed` survive exactly.
+
+### 3. Paste it into KV
+
+Cloudflare dashboard → **Storage & Databases** → **KV** → click your namespace
+(`econ-briefing-queue`). On older accounts this is under **Workers & Pages** →
+**KV** → the namespace's **View** button.
+
+Add an entry:
+
+| field | value |
+|---|---|
+| **Key** | `list` |
+| **Value** | the JSON you copied in step 2 |
+
+Then **Add entry** / **Save**.
+
+Three things that will silently break this:
+
+- **The key must be exactly `list`** — lower case, no spaces, no `q:` prefix. The
+  Worker looks for that one name, and the `q:` prefix is the queue's.
+- **Do not wrap it.** Paste the list object itself, not
+  `{"list": {...}}` — that shape is only what the HTTP API accepts.
+- Leading or trailing whitespace is fine; a missing brace is not. If the value is
+  not valid JSON the Worker silently falls back to the repository copy, which
+  looks like nothing happened.
+
+### 4. Confirm KV is now the source
+
+Reload `<your-worker>/health`. You need:
 
 ```json
-"list":{"source":"kv","approved":N,...}
+"list":{"source":"kv","approved":2,"pending":0,"unsubscribed":0}
 ```
 
-`source: "kv"` means migration is done. Until it says that, do not go on.
+**`source` must say `kv`, and the counts must match what you pasted.** KV is
+eventually consistent, so give it up to a minute and reload.
 
-**4. Merge the change that deletes `subscribers.json`.** It is now in
-`.gitignore`; workflows fetch it to that path at run time and must never commit
-it again.
+If it still says `git`, the key name is wrong or the value is not valid JSON —
+those are the only two causes. Do not continue until this reads `kv`: the next
+step deletes the other copy.
 
-**5. Optional: delete `LIST_URL`** from the Worker's variables. Once KV holds the
-list it is never read, and removing it is what makes the repository's visibility
-irrelevant.
+### 5. Merge the change that deletes `subscribers.json`
+
+It is gitignored from now on. Workflows fetch it to that path at run time and
+must never commit it again.
+
+### 6. Optional — delete `LIST_URL` from the Worker
+
+Settings → Variables and Secrets → remove `LIST_URL` → **Deploy**. Once KV holds
+the list it is never read, and removing it is what makes the repository's
+visibility irrelevant to the Worker.
+
+### If you would rather not use the dashboard
+
+Actions → **Answer the Telegram bot** → Run workflow → tick **seed** does steps
+2–4 in one go: it copies the committed list into KV, reads it back, and fails if
+they differ. It prints counts only, never ids. The dashboard path above is
+equivalent and keeps the list out of a workflow log entirely.
 
 ## Verifying it end to end
 

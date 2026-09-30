@@ -96,9 +96,11 @@ async function enqueue(env, item, seq, n = 0) {
 }
 
 /**
- * The current list, read from the public repository. No credential needed — the
- * repo is public, which is what makes this cheap. Failure is not fatal: the
- * Worker falls back to answering without list context rather than going silent.
+ * The current list, from KV. Reports where it came from, because "did my
+ * migration land?" and "why is it answering as though nobody is subscribed?"
+ * are the same question asked from two directions, and only the source answers
+ * both. Failure is not fatal: the Worker answers without list context rather
+ * than going silent.
  */
 async function storedList(env) {
   // KV first — the authoritative home. LIST_URL is only a migration fallback,
