@@ -137,6 +137,76 @@ rep = recall_from_chat(NoDelete({10: BAD}), 111, BAD, "notice")
 check("a refused delete is reported as not deleted",
       not rep["deleted"] and "can't be deleted" in rep["note"], rep["note"])
 
+# --- the bug that let the owner's copy survive the first real run -----------
+# Telegram rejects an edit that changes nothing with "message is not
+# modified". A report run wrote the plain caption onto the owner's copy; the
+# delete run then probed with that same caption, got the rejection, read it as
+# "not ours", walked past and stopped on the previous edition.
+class Captioned(Telegram):
+    """Telegram, but it also enforces the not-modified rule."""
+
+    def __init__(self, messages, captions=None, **kw):
+        super().__init__(messages, **kw)
+        self.captions = dict(captions or {})
+
+    def __call__(self, method, payload):
+        if method == "editMessageCaption":
+            mid, cap = payload["message_id"], payload["caption"]
+            if self.messages.get(mid) is not None and self.captions.get(mid) == cap:
+                return {"ok": False,
+                        "description": "Bad Request: message is not modified"}
+            out = super().__call__(method, payload)
+            if out.get("ok"):
+                self.captions[mid] = cap
+            return out
+        return super().__call__(method, payload)
+
+
+PLAIN = "Daily Economic Briefing — 2026-09-07"
+tg = Captioned({10: GOOD, 11: BAD}, captions={11: PLAIN})
+rep = recall_from_chat(tg, 111, BAD, "notice")
+check("a message already carrying the plain caption is still found",
+      rep["found"] and rep["found"]["file_name"] == BAD, str(rep["found"]))
+check("and is deleted rather than walked past", rep["deleted"] and 11 not in tg.messages)
+check("and the earlier good edition is untouched", tg.messages.get(10) == GOOD)
+
+# The padding has to be invisible, or every recall defaces the caption it
+# probes. U+200B is a zero-width space.
+probes = [p["caption"] for m, p in tg.calls if m == "editMessageCaption"]
+check("the probe differs from the stored caption", probes[0] != PLAIN)
+check("and differs only by zero-width padding",
+      probes[0].replace("\u200b", "") == PLAIN, repr(probes[0]))
+
+# A dry run must leave nothing behind, or it arms exactly the failure above.
+tg = Captioned({10: BAD}, captions={10: PLAIN})
+rep = recall_from_chat(tg, 111, BAD, "notice", dry_run=True)
+check("a dry run undoes its own probe caption", rep["restored"] is True)
+check("and leaves the caption exactly as it found it",
+      tg.captions[10] == PLAIN, repr(tg.captions[10]))
+check("so a real run straight afterwards still deletes it",
+      recall_from_chat(tg, 111, BAD, "notice")["deleted"])
+
+# Belt and braces: if padding somehow still collides, keep padding rather
+# than reporting a miss.
+class AlwaysNotModified(Telegram):
+    def __init__(self, messages, give_up_after=2, **kw):
+        super().__init__(messages, **kw)
+        self.attempts = 0
+        self.give_up_after = give_up_after
+
+    def __call__(self, method, payload):
+        if method == "editMessageCaption":
+            self.attempts += 1
+            if self.attempts <= self.give_up_after:
+                return {"ok": False, "description": "message is not modified"}
+        return super().__call__(method, payload)
+
+
+tg = AlwaysNotModified({10: BAD})
+rep = recall_from_chat(tg, 111, BAD, "notice")
+check("a repeated not-modified is retried, not treated as a miss",
+      rep["deleted"], f"{tg.attempts} attempt(s)")
+
 # --- the log must not republish chat ids ------------------------------------
 check("chat ids are masked", mask(619918917) == "…917")
 out = summarise([{"chat": 619918917, "probed": 2, "found": {"file_name": BAD},

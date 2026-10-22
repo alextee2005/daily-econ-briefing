@@ -374,11 +374,17 @@ Actions → **Recall a misdelivered briefing** → Run workflow.
    `Daily_Economic_Briefing_20260907.pdf`. It is matched against the file name
    Telegram itself reports for the message, so a typo deletes nothing rather
    than the wrong thing.
-2. `mode: report` **first.** This rehearses the entire walk against the
-   owner's chat alone and deletes nothing. Read the summary table: it should
-   show the bad file found in the owner's chat.
-3. Then `mode: delete`, which does the same across the owner and every
-   approved subscriber, and leaves a one-line correction in each chat.
+2. Leave the defaults (`targets: owner`, `apply` off) for the first run. That
+   rehearses the entire walk against the owner's chat alone and deletes
+   nothing. Read the summary table: it should show the bad file found.
+3. Then `targets: all` with `apply` on, which does the same across the owner
+   and every approved subscriber and leaves a one-line correction in each
+   chat.
+
+`targets` and `apply` are separate on purpose. A chat the real run could not
+clean is retried on its own with `targets: owner` — or by narrowing the list —
+rather than by re-running everything and sending a second correction to
+people who were already dealt with.
 
 ### How it finds the message, and why that is safe
 
@@ -392,6 +398,17 @@ edited, read or copied by it, so the walk steps over them blind. That rules
 out the two obvious alternatives, `forwardMessage` and `copyMessage`: either
 would relay a subscriber's private messages to the owner to discover what they
 were.
+
+The probe writes the target's own caption plus one or more zero-width spaces.
+The padding is invisible and is load-bearing: `editMessageCaption` rejects an
+edit that changes nothing with "message is not modified", and that rejection
+is indistinguishable from "this message is not ours". The first real run hit
+exactly this — the preceding rehearsal had written the plain caption onto the
+owner's copy, so the run meant to delete it read the rejection as a miss,
+walked past and stopped on the previous edition. Four subscribers were
+cleaned; the owner's copy survived. Probes now always differ, a "not
+modified" reply is retried with more padding, and a rehearsal puts the
+caption back before it finishes.
 
 A message is deleted only when the file name Telegram returns matches exactly.
 If the newest document in a chat is some *other* edition, the run restores
