@@ -57,11 +57,41 @@ otherwise ship. Where two sources disagree, prefer the more authoritative, use
 the better-corroborated figure, and disclose the disagreement rather than
 silently picking one. Where a figure is single-sourced, say so inline.
 
-Re-verify standing facts fresh from primary sources every single run — who
-chairs the Fed, when the next policy meeting lands, whether a scheduled event
-already happened. These drift, and a prompt's own framing is not a verified
-source. Assuming one from memory has been the single largest error class in
-this report's history.
+Standing facts split into two kinds and get different treatment. Assuming a
+live one from memory has been the single largest error class in this report's
+history. Re-fetching a settled one every morning is pure cost — by edition 47
+the Fed Chair had been directly re-confirmed eighteen editions running, every
+one of them unchanged.
+
+**Live — verify fresh from a primary source every run.** Anything with a
+moving value or a scheduled next change: current policy rates, upcoming
+meeting dates, rate-path odds, whether a scheduled event has happened yet, a
+funding status with an expiry date, and every open thread. A prompt's own
+framing is not a verified source.
+
+**Settled — carry forward, do not re-verify.** A fact qualifies only when both
+hold: it has been directly confirmed unchanged on three or more consecutive
+editions, *and* it can change only through a discrete, announced event that
+the day's own research would surface anyway. Who chairs the Fed, a past
+meeting's outcome and vote, a decision whose date has passed. Record the date
+and source of the last direct confirmation beside it so the chain stays
+auditable.
+
+A settled fact re-opens on three triggers, and otherwise not at all:
+
+- **Contradiction.** Any pass reports something inconsistent with it — verify
+  before drafting, not after. The four passes cross-check each other for
+  exactly this.
+- **Its named expiry.** Every settled entry carries the event that would
+  invalidate it: a term end, a successor named, a scheduled review. When that
+  lands, the fact is live again.
+- **The monthly audit.** On the first edition of each calendar month,
+  re-confirm the whole settled list directly against primary sources. One
+  sweep a month rather than one a day, so a change nobody reported still
+  surfaces within weeks.
+
+A date does not promote itself. A future meeting date stays live until it
+passes; only afterwards is it settled history.
 
 Anything still unresolved goes in Annex A as unavailable. Never estimate,
 infer, or reconstruct a number from memory.

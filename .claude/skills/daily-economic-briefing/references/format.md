@@ -11,7 +11,7 @@
 4. **1 Market recap** — snap-grid tiles + one paragraph
 5. **2 Equities and earnings** — LEAD, largest section: sector rotation, movers
    table, earnings, analyst actions
-6. **3 Macro, policy and rates** — condensed
+6. **3 Macro, policy and rates** — condensed: policy-rate table + prose
 7. **4 Commodities and FX** — levels table + prose. Hard assets and FX only
 8. **5 Derivatives, volatility and positioning** — condensed, no credit
 9. **6 The day ahead** — catalysts table + "sector setup we take into
@@ -58,6 +58,32 @@ Stable across many editions; don't tighten it without evidence of overflow.
 - The `~` character renders as a minus-like glyph at these point sizes. Write
   "approx." from the start; the late-added line outside the main drafting pass
   is where a stray one usually slips in.
+
+## The policy-rate table (Section 3)
+
+Other central banks' rates go in a table, not in prose. A paragraph that walks
+the reader through six banks' levels is the least readable thing in the
+document and the easiest to leave stale.
+
+| Central bank | Policy rate | Last change | Next decision |
+|---|---|---|---|
+
+The Fed goes first as the anchor to compare against, then whichever of the
+BoE, BoJ, ECB, SNB, Norges Bank, Riksbank, RBA, BoC and Banxico the window
+actually touches. Eight to ten rows is the working range. A bank with no
+verified current rate gets the row with that cell marked unavailable and an
+Annex A entry — dropping the row hides the gap.
+
+**This replaces the prose that used to carry those levels; it is not added on
+top of it.** Section 3's prose keeps what a table cannot hold: what moved
+inside the window, vote splits, the divergence that matters, the one bank
+whose guidance changed. Net page impact should be roughly neutral. If page 3
+overflows anyway, cut rows that had no news in the window before cutting any
+prose.
+
+Policy rate and next decision are live facts — verify both fresh every run.
+Last change is settled history once its date has passed, so it carries
+forward. See "Verify before you build" in SKILL.md.
 
 ## Filling a short page 3
 

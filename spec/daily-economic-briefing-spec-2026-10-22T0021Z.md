@@ -75,13 +75,43 @@ US daylight time that's 00:00 UTC; adjust for standard time. On Mondays
 (or after any gap), cover the full window back to the previous edition's
 cutoff, including the weekend.
 
-## Standing facts — verify fresh every edition, never from memory
-- **The September 2026 FOMC meeting (15–16 Sept) is fully resolved and does
-  not need re-verifying again:** the Committee raised the federal funds target
+## Standing facts — settled ones carry forward, live ones verify fresh
+
+**Read this before working the list below.** Standing facts are in two tiers
+and they get different treatment. The old rule — re-verify everything, every
+edition — was right about the live ones and wasteful about the rest: by
+edition 47 the Fed Chair had been directly re-confirmed eighteen editions
+running, unchanged every time, and that fetch displaced research that had
+somewhere to go.
+
+- **Live — verify fresh from a primary source every edition.** A moving value
+  or a scheduled next change: current policy rates, upcoming meeting dates,
+  rate-path odds, whether a scheduled event has happened yet, government
+  funding status and its expiry, and every open thread below.
+- **Settled — carry forward, do not re-verify.** Qualifies only when both
+  hold: directly confirmed unchanged on three or more consecutive editions,
+  *and* changeable only through a discrete announced event that the day's own
+  research would surface anyway. Entries below marked **SETTLED** are done;
+  do not spend a fetch on them.
+
+A settled entry re-opens on exactly three triggers, and otherwise not at all:
+a **contradiction** surfaced by any research pass (verify before drafting);
+its **named expiry** landing; or the **monthly audit** — on the first edition
+of each calendar month, re-confirm every settled entry directly, then record
+the date. That is one sweep a month instead of one a day, so a change nobody
+reported still surfaces within weeks rather than never.
+
+A date does not promote itself. A future meeting date is live until it
+passes; only afterwards is it settled history. When you do promote something,
+write the date and source of its last direct confirmation and the event that
+would invalidate it — a tier with no audit trail is just an assumption.
+
+- **SETTLED — the September 2026 FOMC meeting (15–16 Sept) is fully resolved
+  and does not need re-verifying again:** the Committee raised the federal funds target
   range 25bp to 3.75%–4.00% on Wednesday 16 Sept 2026, unanimous 12-0, the
   first hike since 2023.
-- **FOMC minutes from the Sept 15-16 meeting — closed thread as of edition 37,
-  do not re-derive:** released Wednesday 7 October 2026, 2:00pm ET, read
+- **SETTLED — FOMC minutes from the Sept 15-16 meeting, closed as of edition
+  37, do not re-derive:** released Wednesday 7 October 2026, 2:00pm ET, read
   directly against federalreserve.gov. Vote was unanimous 12-0 with no dissent
   recorded ("all participants viewed a higher target range... as
   appropriate"). The one internal-division signal: "most participants" (not
@@ -141,15 +171,27 @@ cutoff, including the weekend.
   actually surfaces. Separately noted at edition 47: the Busan US-China trade
   truce has reportedly been extended to **10 January 2027** (background
   context, not independently primary-sourced this run).
-- General principle: do not assume any routine macro-calendar fact (Fed
-  personnel, meeting dates, symposium schedules, other central banks' policy
-  rates, government funding status) from memory or from the prompt's own
-  framing — verify it fresh from a primary source (federalreserve.gov,
-  bankofengland.co.uk, boj.or.jp, kansascityfed.org, norges-bank.no,
-  riksbank.se, banxico.org.mx, snb.ch, rba.gov.au, whitehouse.gov, etc.) every
-  edition, exactly like any other data point. **Edition 47 re-confirmed Kevin
-  Warsh as Fed Chair directly against federalreserve.gov's Board of Governors
-  bios page — an eighteenth straight direct re-confirmation.** The BoE's next
+- **Fed Chair: Kevin Warsh — SETTLED as of edition 48, stop re-verifying it
+  every run.** Last direct confirmation edition 47, against
+  federalreserve.gov's Board of Governors bios page, the eighteenth straight
+  unchanged re-confirmation (the premise was corrected to Warsh at edition 6
+  and has not moved since). Named expiry — any one of these puts it back on
+  the live list immediately: a successor nominated or confirmed, a
+  resignation or removal, or the end of his four-year term as Chair. Edition
+  48 should record that term-end date once, from federalreserve.gov, and
+  carry it forward thereafter; after that the entry costs nothing until the
+  monthly audit or a contradiction. If any pass reports a different Chair,
+  that is a contradiction — verify it before drafting, do not assume the pass
+  is wrong.
+- General principle for everything still live: do not assume a routine
+  macro-calendar fact (meeting dates, symposium schedules, other central
+  banks' policy rates, government funding status) from memory or from the
+  prompt's own framing — verify it fresh from a primary source
+  (federalreserve.gov, bankofengland.co.uk, boj.or.jp, kansascityfed.org,
+  norges-bank.no, riksbank.se, banxico.org.mx, snb.ch, rba.gov.au,
+  whitehouse.gov, etc.) every edition, exactly like any other data point.
+  These are the rates and dates that feed Section 3's policy-rate table, so
+  the table is the natural place to land them. The BoE's next
   decision (Thursday 5 November, now under two weeks out) was freshly
   re-touched at edition 47 via a direct bankofengland.co.uk fetch —
   unchanged, now confirmed directly for nine straight editions (39-47).
@@ -175,13 +217,15 @@ cutoff, including the weekend.
   figures. This numeric-rate gap is now **three straight editions (45-47)** —
   try a dedicated rate-specific HTML page (not the decision PDF) at edition
   48, since the raw-PDF approach has now failed three times running.
-- **Bank of England: held at 3.75% on Thursday 17 Sept 2026, a 6-3 vote**
+- **SETTLED — Bank of England held at 3.75% on Thursday 17 Sept 2026, a 6-3
+  vote**
   (same three dissenters as 30 July, all favoring a hike to 4.00%) — resolved,
   does not need re-confirming again unless a new decision date has passed.
   **Next BoE decision: Thursday 5 November 2026** — re-confirmed directly
   again at edition 47 (following decision 17 December 2026). Continue the
   direct-fetch discipline given the meeting is now under two weeks out.
-- **Bank of Japan: hiked 25bp to approx. 1.25% on 18 September 2026**
+- **SETTLED (the September decision only) — Bank of Japan hiked 25bp to
+  approx. 1.25% on 18 September 2026**
   (effective 24 Sept), a 31-year high, a 7-2 vote (dissenters Asada Toichiro
   and Sato Ayano), both primary-sourced as of edition 37 — closed thread, do
   not re-derive. **The next policy meeting date (Oct 29-30, 2026) remained
@@ -189,13 +233,13 @@ cutoff, including the weekend.
   though not via an explicit dedicated fresh direct fetch this run — see the
   general-principle entry above for both this caveat and the numeric-rate gap
   (now three straight editions open, 45-47).
-- **The four-central-bank Thursday 24 September 2026 cluster remains fully
-  resolved — closed thread, do not re-open:** Norges Bank hiked 25bp to 4.50%
+- **SETTLED — the four-central-bank Thursday 24 September 2026 cluster,
+  closed thread, do not re-open:** Norges Bank hiked 25bp to 4.50%
   (hawkish surprise); Riksbank held at 1.75% but signalled a greater chance of
   a Q4 hike; Banxico held at 6.50% unanimously; SNB held at 0% and raised its
   inflation forecasts, confirmed directly against snb.ch.
-- **The Reserve Bank of Australia's Tuesday 29 September 2026 decision remains
-  fully resolved — closed thread, do not re-open:** hiked 25bp to **4.60%,
+- **SETTLED — the Reserve Bank of Australia's Tuesday 29 September 2026
+  decision, closed thread, do not re-open:** hiked 25bp to **4.60%,
   unanimous**, a 15-year high and its fourth hike of 2026, confirmed directly
   against rba.gov.au's own Statement by the Monetary Policy Board.
 - **August 2026 PCE inflation — closed thread, resolved at edition 32, do not
@@ -569,7 +613,8 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   pattern when disclosing a divergence against a previously-logged figure —
   editions 43 through 47 have all done this cleanly with `check_refs.py`.
 - **Structure:** 60-second read (5 ranked items) → 1 Market recap → 2
-  Equities and earnings (LEAD) → 3 Macro, policy and rates (condensed) → 4
+  Equities and earnings (LEAD) → 3 Macro, policy and rates (condensed;
+  policy-rate table + prose, see the next bullet) → 4
   Commodities and FX (hard assets + FX only) → 5 Derivatives, volatility and
   positioning (condensed, no credit) → 6 The day ahead → Annex A (what could
   not be verified) → Annex B (sources) → Method note. **Do not duplicate the
@@ -577,6 +622,28 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   and the Section 6 table — edition 47's first draft did exactly this and it
   was the single largest contributor to a 5-page overflow; Section 6's table
   is the one and only place the day-ahead calendar belongs.**
+- **Section 3 carries a central-bank policy-rate table — new at edition 48,
+  by request.** Other central banks' rates in a paragraph are the least
+  readable thing in the document; put the levels in a table and keep the
+  prose for what a table cannot hold. Columns: **Central bank | Policy rate |
+  Last change | Next decision**. The Fed goes first as the anchor to compare
+  against, then whichever of the BoE, BoJ, ECB, SNB, Norges Bank, Riksbank,
+  RBA, BoC and Banxico the window actually touches — eight to ten rows is the
+  working range. A bank whose current rate could not be verified still gets
+  its row, with that cell marked unavailable and a matching Annex A entry;
+  dropping the row hides the gap instead of disclosing it. **This replaces
+  the prose that used to carry those levels, it is not added on top of it**
+  — Section 3's prose keeps what moved inside the window, vote splits, and
+  the divergence that matters, so net page impact should be roughly neutral.
+  If page 3 overflows anyway, cut rows that had no news in the window before
+  cutting any prose. Note the long-standing trap one bullet up: this table is
+  policy rates, *not* a day-ahead calendar — the Section 6 table remains the
+  only place the day-ahead calendar belongs, and edition 47's 5-page
+  overflow came from duplicating it in Section 3. The rate and next-decision
+  cells are live facts, re-verified every edition; the last-change cell is
+  settled history once its date has passed (see Standing facts above).
+  Follow the usual table convention — plain `<tr>` header rows, no
+  `<thead>`.
 - **Charts:** 2 per edition, neither duplicating a table. Keep the
   single-stock movers bar chart. Pick chart 2 by what the day's dominant
   story actually is (see Chart #2 guidance under Production notes). **Chart

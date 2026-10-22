@@ -14,10 +14,15 @@ as "the close" by at least one vendor on a regular basis. Multiple real errors
 have come from this. Cross-check any close that looks surprising against a
 second source, and prefer sources that expose a timestamp.
 
-**Carried-forward assumption.** A fact that was true three editions ago (who
-chairs the Fed, when a meeting lands, whether a keynote already happened) is
-not evidence. Re-verify from the primary source every run. The prompt's own
-framing doesn't count as a source either.
+**Carried-forward assumption.** A *live* fact that was true three editions ago
+— where a policy rate sits, when a meeting lands, whether a keynote already
+happened — is not evidence. Re-verify it from the primary source every run;
+the prompt's own framing doesn't count as a source either.
+
+This applies to live facts only. A settled one is carried forward on purpose,
+with the date and source of its last direct confirmation recorded, and
+re-opened only on contradiction, on its named expiry, or at the monthly audit
+— see "Verify before you build" in SKILL.md for which is which.
 
 ## What works
 

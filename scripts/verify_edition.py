@@ -49,6 +49,10 @@ REQUIRED_SECTIONS = [
     ("Commodities", r"Commodities"),
     ("Derivatives", r"Derivatives"),
     ("The day ahead", r"day ahead"),
+    # Section 3's policy-rate table, required from edition 48. Matched on the
+    # header cell rather than any bank's name: which banks appear depends on
+    # the window, but the first column header does not.
+    ("Policy-rate table", r"Central\s*bank"),
     ("Annex A", r"Annex\s*A"),
     ("Annex B", r"Annex\s*B"),
     ("Method note", r"Method\s*(note|:)"),
