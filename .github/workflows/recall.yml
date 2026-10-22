@@ -1,0 +1,142 @@
+name: Recall a misdelivered briefing
+
+# Deletes one specific PDF the bot sent, from the owner's chat and every
+# approved subscriber's chat, and leaves a one-line correction behind.
+#
+# Built after 22 October 2026, when a push to a feature branch triggered
+# deliver.yml and the filename-sort fallback picked the 7 September edition.
+# Five chats received a forty-five-day-old briefing.
+#
+# TWO THINGS TO KNOW BEFORE RUNNING IT
+#
+#   1. Telegram only lets a bot delete its own messages for 48 HOURS. After
+#      that the copy in a subscriber's chat cannot be removed by anything
+#      available here. This is the whole clock.
+#   2. There is no way to ask Telegram what a bot has sent, so the message id
+#      is not recorded anywhere. The run finds it by sending the correction
+#      first and walking back from it, identifying each candidate by the
+#      document file name Telegram reports. It deletes only an exact match.
+#      scripts/recall_message.py explains why that probe cannot touch a
+#      subscriber's own messages.
+#
+# Run with mode=report first. That rehearses the whole walk against the
+# OWNER'S chat only and deletes nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_name:
+        description: "Exact document name to delete (e.g. Daily_Economic_Briefing_20260907.pdf)"
+        required: true
+      mode:
+        description: "report = owner's chat only, delete nothing. delete = all recipients, for real"
+        type: choice
+        options: [report, delete]
+        default: report
+      notice:
+        description: "Correction sent to each chat (it is also the anchor the walk needs)"
+        required: false
+        default: "Correction: the briefing just sent was an old edition, dispatched in error. Please disregard it. Today's edition was sent earlier and is unaffected. Apologies for the noise."
+      lookback:
+        description: "How many message ids to walk back per chat"
+        required: false
+        default: "25"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-delivery # never interleave with a delivery
+  cancel-in-progress: false
+
+jobs:
+  recall:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refuse an implausible target
+        env:
+          FILE_NAME: ${{ inputs.file_name }}
+        run: |
+          set -euo pipefail
+          # A typo here deletes nothing (no match) rather than the wrong thing,
+          # but a name with a path or a wildcard in it means the operator has
+          # misunderstood what this does, and that is worth stopping for.
+          case "$FILE_NAME" in
+            */*|*'*'*|"") echo "::error::Give a bare file name, not a path or a pattern."; exit 1 ;;
+          esac
+          if [ ! -f "editions/${FILE_NAME}" ]; then
+            echo "::warning::editions/${FILE_NAME} is not in this repository."
+            echo "::warning::That is allowed — the name only has to match what"
+            echo "::warning::Telegram reports — but check it is not a typo."
+          fi
+
+      - name: Work out who received it
+        id: who
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -uo pipefail
+          if [ -z "${OWNER_CHAT_ID:-}" ]; then
+            echo "::error::TELEGRAM_CHAT_ID is not set; there is no owner chat to work from."
+            exit 1
+          fi
+
+          if [ "$MODE" = "report" ]; then
+            # Rehearsal: the owner's own chat and nothing else.
+            echo "chats=${OWNER_CHAT_ID}" >> "$GITHUB_OUTPUT"
+            echo "Rehearsing against the owner's chat only."
+            exit 0
+          fi
+
+          if [ -z "${DRAIN_URL:-}" ]; then
+            echo "::error::TELEGRAM_DRAIN_URL is not set, so the subscriber list"
+            echo "::error::cannot be read and subscribers would be missed."
+            exit 1
+          fi
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/list.json; then
+            echo "::error::Could not reach the Worker to read the subscriber list."
+            exit 1
+          fi
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d = json.load(open('/tmp/list.json'))
+          lst = d.get('list') or {}
+          owner = os.environ['OWNER_CHAT_ID'].strip()
+          # Same order deliver.yml sends in, so the two runs line up.
+          ids = [owner] + [str(e['chat_id']) for e in (lst.get('approved') or [])
+                           if str(e['chat_id']) != owner]
+          print(f"chats={','.join(ids)}")
+          print(f"::notice::Recalling from {len(ids)} chat(s).", file=__import__('sys').stderr)
+          PY
+
+      - name: Recall it
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHATS: ${{ steps.who.outputs.chats }}
+          FILE_NAME: ${{ inputs.file_name }}
+          NOTICE: ${{ inputs.notice }}
+          LOOKBACK: ${{ inputs.lookback }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          DRY=""
+          [ "$MODE" = "report" ] && DRY="--dry-run"
+          python3 scripts/recall_message.py \
+            --file-name "$FILE_NAME" \
+            --notice "$NOTICE" \
+            --chats "$CHATS" \
+            --lookback "$LOOKBACK" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            $DRY

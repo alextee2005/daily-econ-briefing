@@ -360,6 +360,52 @@ Things worth knowing when reading these:
   unconditionally — a confirmation that does not arrive is a nuisance, a briefing
   that does not arrive because of one is a fault.
 
+## Recalling a briefing sent in error
+
+**The clock is 48 hours.** Telegram lets a bot delete its own messages for
+that long and no longer. After it runs out the copy in a subscriber's chat
+cannot be removed by anything in this repository, by Support, or by deleting
+the bot. Start the recall before anything else, then work out what went
+wrong.
+
+Actions → **Recall a misdelivered briefing** → Run workflow.
+
+1. `file_name` — the exact document name, e.g.
+   `Daily_Economic_Briefing_20260907.pdf`. It is matched against the file name
+   Telegram itself reports for the message, so a typo deletes nothing rather
+   than the wrong thing.
+2. `mode: report` **first.** This rehearses the entire walk against the
+   owner's chat alone and deletes nothing. Read the summary table: it should
+   show the bad file found in the owner's chat.
+3. Then `mode: delete`, which does the same across the owner and every
+   approved subscriber, and leaves a one-line correction in each chat.
+
+### How it finds the message, and why that is safe
+
+Nothing records the message ids — Telegram offers a bot no way to list what it
+has sent. The run therefore sends the correction first and walks backwards
+from its id, because private-chat message ids are one ascending counter.
+
+Each candidate is probed with `editMessageCaption`, which succeeds **only** on
+the bot's own captioned messages. A subscriber's own messages cannot be
+edited, read or copied by it, so the walk steps over them blind. That rules
+out the two obvious alternatives, `forwardMessage` and `copyMessage`: either
+would relay a subscriber's private messages to the owner to discover what they
+were.
+
+A message is deleted only when the file name Telegram returns matches exactly.
+If the newest document in a chat is some *other* edition, the run restores
+that message's caption and stops for that chat rather than digging back
+through older briefings — the operator's assumption is wrong at that point and
+the summary says so.
+
+### What it cannot do
+
+- Nothing older than 48 hours.
+- Nothing a subscriber has already forwarded, saved or screenshotted.
+- Nothing in a chat that has since blocked the bot; that row reports the
+  failure and the run carries on to the others.
+
 ## Verification gate
 
 `scripts/verify_edition.py` runs before anything is committed, and the workflow

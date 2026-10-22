@@ -9,6 +9,12 @@ name: Deliver briefing to Telegram
 
 on:
   push:
+    # Restricted to main. Without this a push to any feature branch that
+    # carries main's edition commits matches the path filter and delivers —
+    # which is how every subscriber was sent the 7 September edition on
+    # 22 October 2026 from a branch that touched no PDF at all.
+    branches:
+      - main
     paths:
       - 'editions/**.pdf'
   workflow_dispatch:
@@ -40,34 +46,29 @@ jobs:
 
       - name: Select the PDF to send
         id: pick
+        env:
+          MANUAL: ${{ github.event.inputs.file }}
         run: |
           set -euo pipefail
-          MANUAL="${{ github.event.inputs.file }}"
 
-          if [ -n "$MANUAL" ]; then
-            PDF="$MANUAL"
-          else
-            # Prefer a PDF added or modified by this push.
-            PDF="$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'editions/*.pdf' 2>/dev/null | tail -n 1 || true)"
-          fi
+          # A PDF this push actually added, if any. Empty is normal and fine —
+          # the picker decides what that means.
+          CHANGED="$(git diff --name-only --diff-filter=AM HEAD~1 HEAD \
+            -- 'editions/*.pdf' 2>/dev/null | tail -n 1 || true)"
 
-          # Fall back to the newest file by name (filenames are ISO-dated, so sort works).
-          if [ -z "${PDF:-}" ]; then
-            PDF="$(ls -1 editions/*.pdf 2>/dev/null | sort | tail -n 1 || true)"
-          fi
+          # Selection lives in scripts/pick_edition.py, under test, because the
+          # version inlined here sorted filenames as bytes and this repository
+          # uses two date conventions — see that file's header.
+          python3 scripts/pick_edition.py \
+            --manual "${MANUAL:-}" --changed "$CHANGED" | tee /tmp/pick.env
+          cat /tmp/pick.env >> "$GITHUB_OUTPUT"
 
-          if [ -z "${PDF:-}" ] || [ ! -f "$PDF" ]; then
-            echo "::error::No PDF found to send (looked for editions/*.pdf)."
-            exit 1
-          fi
-
+          PDF="$(sed -n 's/^pdf=//p' /tmp/pick.env)"
           SIZE_MB=$(( $(stat -c%s "$PDF") / 1048576 ))
           if [ "$SIZE_MB" -ge 50 ]; then
             echo "::error::$PDF is ${SIZE_MB}MB; Telegram's sendDocument limit is 50MB."
             exit 1
           fi
-
-          echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
           echo "Selected: $PDF (${SIZE_MB}MB)"
 
       - name: Fetch the subscriber list
@@ -123,6 +124,8 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PDF: ${{ steps.pick.outputs.pdf }}
+          EDITION_DATE: ${{ steps.pick.outputs.edition_date }}
+          WHY: ${{ steps.pick.outputs.why }}
         run: |
           set -euo pipefail
 
@@ -139,9 +142,11 @@ jobs:
             exit 1
           fi
 
-          DATE="$(basename "$PDF" .pdf | sed 's/.*_//')"
-          CAPTION="Daily Economic Briefing — ${DATE}"
-          echo "Sending ${PDF} to ${#RECIPIENTS[@]} recipient(s)."
+          # The parsed date, not the raw filename suffix: the early editions
+          # are named ..._20260907.pdf and captioning one "Daily Economic
+          # Briefing — 20260907" is how a wrong file looks almost right.
+          CAPTION="Daily Economic Briefing — ${EDITION_DATE}"
+          echo "Sending ${PDF} (${EDITION_DATE}, ${WHY}) to ${#RECIPIENTS[@]} recipient(s)."
 
           # Reads /tmp/tg.json and prints one line: "ok|<file_id>|<description>".
           # Only these three fields ever leave the response — the raw body
@@ -201,6 +206,13 @@ jobs:
               ROLE="subscriber"
             fi
 
+            # Never the whole id. These logs are public, and keeping chat ids
+            # out of the repository is the entire reason the subscriber list
+            # was moved to the Worker's KV — printing them here every morning
+            # put them straight back. The last three digits are enough to tell
+            # two rows apart when one delivery fails.
+            SHOWN="…${CHAT: -3}"
+
             # Upload the PDF once. Telegram returns a file_id for the stored
             # copy, and every later send reuses it — so a list of twenty costs
             # one upload, not twenty, and the sends are far less likely to time
@@ -224,12 +236,12 @@ jobs:
               if [ -z "$FILE_ID" ] && [ -n "$NEW_ID" ]; then
                 FILE_ID="$NEW_ID"
               fi
-              echo "  sent to ${CHAT} (${HOW})"
-              ROWS="${ROWS}| \`${CHAT}\` | ${ROLE} | ${HOW} | sent |"$'\n'
+              echo "  sent to ${SHOWN} (${HOW})"
+              ROWS="${ROWS}| \`${SHOWN}\` | ${ROLE} | ${HOW} | sent |"$'\n'
             else
-              ROWS="${ROWS}| \`${CHAT}\` | ${ROLE} | ${HOW} | **failed** — HTTP ${HTTP}: ${DESC} |"$'\n'
-              FAILED+=("${CHAT} (HTTP ${HTTP}: ${DESC})")
-              echo "::warning::Delivery to ${CHAT} failed — HTTP ${HTTP}: ${DESC}"
+              ROWS="${ROWS}| \`${SHOWN}\` | ${ROLE} | ${HOW} | **failed** — HTTP ${HTTP}: ${DESC} |"$'\n'
+              FAILED+=("${SHOWN} (HTTP ${HTTP}: ${DESC})")
+              echo "::warning::Delivery to ${SHOWN} failed — HTTP ${HTTP}: ${DESC}"
               # The owner is first in the list. If their delivery fails the
               # whole thing is broken, not one stale subscriber, and the
               # file_id needed by everyone else was never issued.
@@ -256,6 +268,8 @@ jobs:
             echo
             echo "\`${PDF}\` ($(( $(stat -c%s "$PDF") / 1024 )) KB) — "\
                  "**${SENT} of ${#RECIPIENTS[@]} delivered** in ${ELAPSED}s."
+            echo
+            echo "Edition **${EDITION_DATE}**, chosen because it was ${WHY}."
             echo
             echo "| chat | role | transfer | result |"
             echo "|---|---|---|---|"

@@ -93,6 +93,11 @@ jobs:
           # edition being made at all, rather than stopping a good one being
           # delivered.
           python3 scripts/test_subscribers.py
+          # Which edition gets sent, and pulling one back when the wrong one
+          # went out. Both are delivery-side, and both are here for the same
+          # reason as the line above: this job runs every morning.
+          python3 scripts/test_pick_edition.py
+          python3 scripts/test_recall_message.py
           # The Worker answers subscribers in real time and carries its own copy
           # of the wording; test_subscribers.py compares the two so they cannot
           # drift. Node is preinstalled on the runner.
