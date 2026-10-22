@@ -141,6 +141,91 @@ def recall_from_chat(call, chat_id, target_file, notice,
     return report
 
 
+ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
+
+
+def _plain(text: str) -> str:
+    """Text with invisible characters and surrounding space removed."""
+    return "".join(c for c in (text or "") if c not in ZERO_WIDTH).strip()
+
+
+def cleanup_notices(call, chat_id, owner_chat_id, notices,
+                    lookback=DEFAULT_LOOKBACK, dry_run=False, extra_ids=()):
+    """Delete the correction notices this tool left in the OWNER'S chat.
+
+    Owner's chat only, and that is enforced rather than documented. Reading a
+    message back needs `forwardMessage`, which is safe here because the chat
+    belongs to the person asking and each forwarded copy is deleted
+    immediately — but pointed at a subscriber it would relay their private
+    messages, which is the thing the main walk is built to avoid.
+
+    `editMessageText` would be the obvious probe and is the wrong one: on a
+    message that is not a notice it does not report what was there, it
+    *overwrites* it. The owner's chat also carries approval notifications,
+    and silently replacing one of those with a correction notice would be a
+    worse bug than the leftover it set out to tidy.
+    """
+    if str(chat_id) != str(owner_chat_id):
+        raise ValueError(
+            "cleanup_notices refuses any chat but the owner's: reading "
+            "messages back forwards them, and that must never point at a "
+            "subscriber."
+        )
+
+    wanted = {_plain(n) for n in notices if _plain(n)}
+    report = {"chat": chat_id, "probed": 0, "deleted": [], "skipped": 0, "note": ""}
+
+    anchor = call("sendMessage", {"chat_id": chat_id, "text": "Tidying up…"})
+    if not anchor.get("ok"):
+        report["note"] = f"could not start: {anchor.get('description', '?')}"
+        return report
+    anchor_id = anchor["result"]["message_id"]
+
+    # The tidy-up message is itself litter, so it is first on the list.
+    candidates = list(extra_ids) + list(
+        range(anchor_id, max(anchor_id - lookback, 0), -1))
+
+    for mid in dict.fromkeys(candidates):  # de-duplicated, order kept
+        report["probed"] += 1
+
+        if mid == anchor_id:
+            text = "Tidying up…"
+        else:
+            fwd = call("forwardMessage", {
+                "chat_id": chat_id, "from_chat_id": chat_id, "message_id": mid,
+            })
+            if not fwd.get("ok"):
+                continue  # gone, or not forwardable — either way, left alone
+            copy = fwd["result"]
+            # Drop the copy straight away, whatever we decide about the
+            # original. Leaving it would be litter of our own making.
+            call("deleteMessage",
+                 {"chat_id": chat_id, "message_id": copy["message_id"]})
+            text = copy.get("text") or ""
+
+        if _plain(text) not in wanted and mid != anchor_id:
+            report["skipped"] += 1
+            continue
+
+        if dry_run and mid != anchor_id:
+            report["deleted"].append({"message_id": mid, "would": True,
+                                      "own": False})
+            continue
+
+        gone = call("deleteMessage", {"chat_id": chat_id, "message_id": mid})
+        if gone.get("ok"):
+            report["deleted"].append({"message_id": mid, "would": False,
+                                      "own": mid == anchor_id})
+
+    # The tidy-up message is always one of the deletions, so counting the
+    # whole list would report success on a run that found nothing.
+    found = [d for d in report["deleted"] if not d.get("own")]
+    report["notices"] = len(found)
+    if not found:
+        report["note"] = f"no notices found in the last {lookback} message ids"
+    return report
+
+
 def mask(chat_id) -> str:
     """A chat id safe for a public log: enough to tell two chats apart."""
     s = str(chat_id)
@@ -189,6 +274,11 @@ def main() -> int:
                     help="comma-separated chat ids")
     ap.add_argument("--lookback", type=int, default=DEFAULT_LOOKBACK)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--clean-notices", action="store_true",
+                    help="afterwards, delete the correction notices this tool "
+                         "left behind. Owner's chat only.")
+    ap.add_argument("--owner-chat", default="",
+                    help="the owner's chat id, required by --clean-notices")
     ap.add_argument("--summary", default="")
     args = ap.parse_args()
 
@@ -218,7 +308,7 @@ def main() -> int:
         print("::error::No chats given.")
         return 1
 
-    reports = []
+    reports, cleanups = [], []
     for i, chat in enumerate(chats):
         rep = recall_from_chat(call, chat, args.file_name, args.notice,
                                lookback=args.lookback, dry_run=args.dry_run)
@@ -228,7 +318,27 @@ def main() -> int:
         if i < len(chats) - 1:
             time.sleep(1)  # stay inside Telegram's bulk limits
 
+    if args.clean_notices:
+        if not args.owner_chat:
+            print("::error::--clean-notices needs --owner-chat.")
+            return 1
+        print("\nTidying up the correction notices.")
+        for chat in chats:
+            if str(chat) != str(args.owner_chat):
+                print(f"  {mask(chat)}: skipped — notices are only tidied from "
+                      f"the owner's own chat.")
+                continue
+            tidy = cleanup_notices(call, chat, args.owner_chat, [args.notice],
+                                   lookback=args.lookback, dry_run=args.dry_run)
+            print(f"  {mask(chat)}: {tidy['notices']} notice(s) removed"
+                  f"{', ' + tidy['note'] if tidy['note'] else ''}")
+            cleanups.append(tidy)
+
     text = summarise(reports, args.file_name, args.dry_run)
+    if cleanups:
+        n = sum(c["notices"] for c in cleanups)
+        text += (f"\n\n**Notices tidied:** {n} correction message(s) removed "
+                 f"from the owner's chat.")
     print(text)
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as fh:

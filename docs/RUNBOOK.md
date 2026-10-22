@@ -416,6 +416,24 @@ that message's caption and stops for that chat rather than digging back
 through older briefings — the operator's assumption is wrong at that point and
 the summary says so.
 
+### Tidying the notices afterwards
+
+Each run leaves its correction notice behind — it has to, because that message
+is the anchor the walk counts back from. `clean_notices` removes them once the
+deletions are done.
+
+It works only on the **owner's** chat, and the code refuses any other rather
+than relying on the operator to get it right. Reading a message back to decide
+whether it is a notice needs `forwardMessage`, which is fine in the owner's
+own chat (each copy is deleted the moment it is read) but pointed at a
+subscriber would relay their private messages. `editMessageText` is the probe
+it deliberately does not use: on a message that is not a notice it does not
+report what was there, it overwrites it — and the owner's chat also carries
+approval notifications.
+
+Subscribers keep their correction notice. That is intended: it is the only
+record they have of why a briefing vanished.
+
 ### What it cannot do
 
 - Nothing older than 48 hours.

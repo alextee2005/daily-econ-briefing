@@ -44,6 +44,10 @@ on:
         description: "Correction sent to each chat (it is also the anchor the walk needs)"
         required: false
         default: "Correction: the briefing just sent was an old edition, dispatched in error. Please disregard it. Today's edition was sent earlier and is unaffected. Apologies for the noise."
+      clean_notices:
+        description: "Also delete the correction notices left in the OWNER'S chat"
+        type: boolean
+        default: false
       lookback:
         description: "How many message ids to walk back per chat"
         required: false
@@ -135,6 +139,8 @@ jobs:
           NOTICE: ${{ inputs.notice }}
           LOOKBACK: ${{ inputs.lookback }}
           APPLY: ${{ inputs.apply }}
+          CLEAN: ${{ inputs.clean_notices }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           # Anything but an explicit true is a rehearsal. Written as `if`
@@ -148,10 +154,15 @@ jobs:
             DRY="--dry-run"
             echo "Rehearsal — nothing will be deleted."
           fi
+          CLEAN_ARGS=""
+          if [ "$CLEAN" = "true" ]; then
+            CLEAN_ARGS="--clean-notices --owner-chat ${OWNER_CHAT_ID}"
+          fi
+
           python3 scripts/recall_message.py \
             --file-name "$FILE_NAME" \
             --notice "$NOTICE" \
             --chats "$CHATS" \
             --lookback "$LOOKBACK" \
             --summary "$GITHUB_STEP_SUMMARY" \
-            $DRY
+            $DRY $CLEAN_ARGS
