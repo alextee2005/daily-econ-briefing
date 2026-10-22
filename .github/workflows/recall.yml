@@ -19,8 +19,11 @@ name: Recall a misdelivered briefing
 #      scripts/recall_message.py explains why that probe cannot touch a
 #      subscriber's own messages.
 #
-# Run with mode=report first. That rehearses the whole walk against the
-# OWNER'S chat only and deletes nothing.
+# Rehearse first with the defaults (targets=owner, apply off): the whole walk
+# runs against the OWNER'S chat and deletes nothing. Then targets=all with
+# apply on. The two inputs are separate so that a chat missed by a real run
+# can be retried on its own, without re-notifying everyone who was already
+# dealt with.
 
 on:
   workflow_dispatch:
@@ -28,15 +31,23 @@ on:
       file_name:
         description: "Exact document name to delete (e.g. Daily_Economic_Briefing_20260907.pdf)"
         required: true
-      mode:
-        description: "report = owner's chat only, delete nothing. delete = all recipients, for real"
+      targets:
+        description: "Whose chats to work on"
         type: choice
-        options: [report, delete]
-        default: report
+        options: [owner, all]
+        default: owner
+      apply:
+        description: "Actually delete. Leave off for a rehearsal that changes nothing."
+        type: boolean
+        default: false
       notice:
         description: "Correction sent to each chat (it is also the anchor the walk needs)"
         required: false
         default: "Correction: the briefing just sent was an old edition, dispatched in error. Please disregard it. Today's edition was sent earlier and is unaffected. Apologies for the noise."
+      clean_notices:
+        description: "Also delete the correction notices left in the OWNER'S chat"
+        type: boolean
+        default: false
       lookback:
         description: "How many message ids to walk back per chat"
         required: false
@@ -83,7 +94,7 @@ jobs:
           DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
           DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MODE: ${{ inputs.mode }}
+          TARGETS: ${{ inputs.targets }}
         run: |
           set -uo pipefail
           if [ -z "${OWNER_CHAT_ID:-}" ]; then
@@ -91,10 +102,9 @@ jobs:
             exit 1
           fi
 
-          if [ "$MODE" = "report" ]; then
-            # Rehearsal: the owner's own chat and nothing else.
+          if [ "$TARGETS" = "owner" ]; then
             echo "chats=${OWNER_CHAT_ID}" >> "$GITHUB_OUTPUT"
-            echo "Rehearsing against the owner's chat only."
+            echo "Working on the owner's chat only."
             exit 0
           fi
 
@@ -128,15 +138,31 @@ jobs:
           FILE_NAME: ${{ inputs.file_name }}
           NOTICE: ${{ inputs.notice }}
           LOOKBACK: ${{ inputs.lookback }}
-          MODE: ${{ inputs.mode }}
+          APPLY: ${{ inputs.apply }}
+          CLEAN: ${{ inputs.clean_notices }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
-          DRY=""
-          [ "$MODE" = "report" ] && DRY="--dry-run"
+          # Anything but an explicit true is a rehearsal. Written as `if`
+          # rather than an && chain for the reason deliver.yml records: the
+          # chain's exemption from `set -e` is too subtle to rely on where
+          # getting it wrong means the step dies before it deletes anything.
+          if [ "$APPLY" = "true" ]; then
+            DRY=""
+            echo "APPLYING — matching messages will be deleted."
+          else
+            DRY="--dry-run"
+            echo "Rehearsal — nothing will be deleted."
+          fi
+          CLEAN_ARGS=""
+          if [ "$CLEAN" = "true" ]; then
+            CLEAN_ARGS="--clean-notices --owner-chat ${OWNER_CHAT_ID}"
+          fi
+
           python3 scripts/recall_message.py \
             --file-name "$FILE_NAME" \
             --notice "$NOTICE" \
             --chats "$CHATS" \
             --lookback "$LOOKBACK" \
             --summary "$GITHUB_STEP_SUMMARY" \
-            $DRY
+            $DRY $CLEAN_ARGS
