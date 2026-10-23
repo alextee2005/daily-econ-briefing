@@ -1,0 +1,1354 @@
+# Daily Economic Briefing — Standing Spec (v3)
+
+Source of truth for the recurring Daily Economic Briefing. This version is
+driven by a **GitHub Actions workflow** in `alextee2005/daily-econ-briefing`
+(`.github/workflows/briefing.yml`), which runs Claude Code headlessly, commits
+the PDF, and lets the existing delivery workflow forward it to Telegram.
+
+Everything about *content*, *format*, *sourcing*, and *production* below is
+carried forward unchanged from v2 — it took 21 editions to work out and remains
+correct. Only the "how this runs" section has been rewritten to match the
+pipeline that now executes it.
+
+## How this runs (do not re-derive — this is already wired up)
+
+Each weekday the workflow fires, decides whether there is anything to cover,
+installs the toolchain, and invokes the `/daily-economic-briefing` skill
+(vendored at `.claude/skills/daily-economic-briefing/`) with this spec as its
+instructions. The run is **non-interactive** — there is nobody to ask. If a
+figure cannot be verified, it goes in Annex A.
+
+What the workflow hands each run, and what each run must produce:
+
+1. **Inputs, supplied in the prompt:** the path to this spec (always the newest
+   `spec/daily-economic-briefing-spec-<ISO>.md`), the edition date, the research
+   window, and the list of NYSE sessions covered. Trust these over your own
+   date arithmetic — but still run `date -u` and sanity-check.
+2. **Output 1 — the PDF:** written to
+   `editions/Daily_Economic_Briefing_YYYY-MM-DD.pdf`. A verification step then
+   checks it is exactly 4 pages, that `check_refs.py` passes, and that there are
+   zero stray `~` characters. Fix these before finishing, not after.
+3. **Output 2 — the next spec:** written to a new
+   `spec/daily-economic-briefing-spec-<ISO>.md` (the exact path is given in the
+   prompt). This is the full spec carried forward, with standing facts
+   re-verified, a new edition-log row appended, older editions condensed per the
+   log's own convention, and open threads updated. You have free rein over its
+   content — but it is the *only* instructions the next run will get, so never
+   truncate a section or drop a rule you did not deliberately decide to change.
+4. **Do not run any `git` command.** A later workflow step commits and pushes.
+   Delivery to Telegram is handled downstream; there is no in-chat delivery step
+   and no file to send.
+5. **The environment is already prepared.** Chromium is installed and
+   `CHROMIUM_PATH`/`PLAYWRIGHT_BROWSERS_PATH` is set — do **not** run
+   `playwright install`. matplotlib and `pdftoppm` (poppler-utils) are present.
+
+Operational setup (secrets, how to trigger a manual run, how to recover from a
+failed run) lives in `docs/RUNBOOK.md`, not here.
+
+## Two header details worth re-stating (both got wrong in earlier editions)
+
+- **The document's date line is the EDITION date, not the session it covers.**
+  Editions 20 and 21 both read "Tuesday 15 September 2026" and "Wednesday 16
+  September 2026" matching their filenames; edition 22 used the session date
+  instead and so carried the same headline date as edition 21. The window line
+  is where the sessions covered belong, not the date line. **Editions 33
+  through 48 have all applied this correctly** ("Friday 2 October 2026"
+  through "Friday 23 October 2026" as the date line in each respective
+  edition, with the window line carrying the session(s) covered) — now
+  confirmed stable across sixteen consecutive editions, treat as settled.
+- **The window line must start at the given research-window start, not
+  earlier.** Edition 23 was given a window starting 2026-09-16 20:00 ET and
+  printed "Tue 15 Sept close/AH," which claimed a session the previous edition
+  already covered. Edition 29 phrased this as "Window: Thu 24 Sept 20:00 ET –
+  Sun 27 Sept 20:22 ET (Fri 25 Sept close/AH + weekend)" — stating the given
+  window bounds first and the actual session covered in parenthetical, which
+  reads cleanly and avoids both traps. Editions 30 through 48 all reused the
+  same pattern — now confirmed clean across twenty consecutive editions (29
+  through 48; edition 48 phrased it "Window: Wed 21 Oct 2026 20:00 ET – Thu 22
+  Oct 2026 20:20 ET (Thu 22 Oct close/AH, the window's one NYSE session)"). No
+  further confirmation needed; treat this as settled.
+
+## Schedule
+Run every weekday. Pick the trigger's local time so the effective research
+cutoff lands roughly 4 hours after the US market close (20:15 ET) — during
+US daylight time that's 00:00 UTC; adjust for standard time. On Mondays
+(or after any gap), cover the full window back to the previous edition's
+cutoff, including the weekend.
+
+## Standing facts — settled ones carry forward, live ones verify fresh
+
+**Read this before working the list below.** Standing facts are in two tiers
+and they get different treatment. The old rule — re-verify everything, every
+edition — was right about the live ones and wasteful about the rest: by
+edition 47 the Fed Chair had been directly re-confirmed eighteen editions
+running, unchanged every time, and that fetch displaced research that had
+somewhere to go.
+
+- **Live — verify fresh from a primary source every edition.** A moving value
+  or a scheduled next change: current policy rates, upcoming meeting dates,
+  rate-path odds, whether a scheduled event has happened yet, government
+  funding status and its expiry, and every open thread below.
+- **Settled — carry forward, do not re-verify.** Qualifies only when both
+  hold: directly confirmed unchanged on three or more consecutive editions,
+  *and* changeable only through a discrete announced event that the day's own
+  research would surface anyway. Entries below marked **SETTLED** are done;
+  do not spend a fetch on them.
+
+A settled entry re-opens on exactly three triggers, and otherwise not at all:
+a **contradiction** surfaced by any research pass (verify before drafting);
+its **named expiry** landing; or the **monthly audit** — on the first edition
+of each calendar month, re-confirm every settled entry directly, then record
+the date. That is one sweep a month instead of one a day, so a change nobody
+reported still surfaces within weeks rather than never. **The next monthly
+audit falls on the first edition of November 2026** — whichever edition
+covers the first NYSE session on or after 1 Nov 2026 should re-confirm the
+full settled list directly.
+
+A date does not promote itself. A future meeting date is live until it
+passes; only afterwards is it settled history. When you do promote something,
+write the date and source of its last direct confirmation and the event that
+would invalidate it — a tier with no audit trail is just an assumption.
+
+- **SETTLED — the September 2026 FOMC meeting (15–16 Sept) is fully resolved
+  and does not need re-verifying again:** the Committee raised the federal funds target
+  range 25bp to 3.75%–4.00% on Wednesday 16 Sept 2026, unanimous 12-0, the
+  first hike since 2023.
+- **SETTLED — FOMC minutes from the Sept 15-16 meeting, closed as of edition
+  37, do not re-derive:** released Wednesday 7 October 2026, 2:00pm ET, read
+  directly against federalreserve.gov. Vote was unanimous 12-0 with no dissent
+  recorded ("all participants viewed a higher target range... as
+  appropriate"). The one internal-division signal: "most participants" (not
+  all) assessed that another increase would likely be appropriate by year-end,
+  with the Committee stressing data-dependency meeting to meeting.
+- **Next FOMC meeting: October 27–28, 2026 — now just 4-5 days out from
+  edition 48's cutoff, and the dominant upcoming catalyst.** Decision expected
+  approx. 2:00pm ET; the press conference is explicitly confirmed on
+  federalreserve.gov's own October events page
+  (`federalreserve.gov/newsevents/2026-october.htm`, re-fetched directly at
+  edition 48: "October 27-28: FOMC meeting, with a press conference on
+  October 28") — the exact clock times (2:00pm decision / 2:30pm presser) are
+  corroborated by pattern/third-party calendars but the Fed's own page does
+  not print minute-level times for a non-SEP meeting, so treat those two
+  specific times as high-confidence inference, not a direct quote. **The
+  Fed's blackout period (Oct 17-29, 2026) was re-confirmed clean at edition
+  48** — a direct fetch of the October events page shows no Fed-speaker
+  entries for Oct 21 or 22, consistent with blackout; don't expect or hunt for
+  Fed commentary through edition 49 unless the decision itself has landed.
+  Following meeting: December 8-9, 2026 (an SEP meeting). **The next edition
+  whose covered session falls on or after Oct 27-28 should lead with the
+  decision.**
+- **Rate-path odds at edition 48 (DeFi Rate's Kalshi/Polymarket-blended
+  aggregator, fetched at Thursday 22 Oct's approx. 8:21-8:31pm ET cutoff):**
+  October 27-28 hold approx. **94%** (hike approx. 6%) — a notable move more
+  dovish from edition 47's approx. 88% hold. **December 8-9 odds**: the
+  source's own headline/movers table showed hike approx. **72%** while a
+  separate meeting-path table on the same page showed **77%** — the same
+  category of internal inconsistency logged at edition 47 (which showed
+  80%/22%), just shifted; still not self-corrected, re-check again at edition
+  49. **Kalshi's own direct fetch failed again (HTTP 429) at edition 48, now
+  twelve consecutive failures (37-48).** Official CME FedWatch also failed
+  again directly (timeout) at edition 48, an **eighth** consecutive failure
+  (41-48). The composite "at least one more hike in 2026" read has still not
+  been freshly re-pulled since edition 38 (last known approx. 80%) — don't
+  cite without a fresh pull.
+- **US-China "30-for-30" tariff framework — remains a closed thread, do not
+  re-open absent a genuine dated Federal Register filing.** Resolved at
+  edition 37 (framework) and edition 47 (implementation-notice sub-question:
+  no effective date, no set timeline, none imminent). **New at edition 48: a
+  direct federalregister.gov search attempt was blocked** — the search
+  interface 302-redirected to `unblock.federalregister.gov`, an apparent
+  bot/rate-limit gate. Log this as a known access obstacle for any future
+  tariff-filing search, not as new information about the tariff thread
+  itself. Separately noted at edition 47: the Busan US-China trade truce has
+  reportedly been extended to **10 January 2027** (background context, not
+  independently primary-sourced).
+- **Fed Chair: Kevin Warsh — SETTLED, stop re-verifying it every run.** No
+  contradiction surfaced at edition 48 (eighteenth-plus straight unchanged
+  confirmation chain; last direct federalreserve.gov bios-page confirmation
+  at edition 47). **Open housekeeping task, not yet done: record Warsh's
+  exact four-year term-end date from federalreserve.gov once** — this was
+  flagged for edition 48 but not completed this run (it fell outside this
+  edition's research-pass scope); carry the instruction forward to edition
+  49. Named expiry — any one of these puts it back on the live list
+  immediately: a successor nominated or confirmed, a resignation or removal,
+  or the end of his four-year term as Chair (once that date is actually
+  known). If any pass reports a different Chair, that is a contradiction —
+  verify it before drafting, do not assume the pass is wrong.
+- General principle for everything still live: do not assume a routine
+  macro-calendar fact (meeting dates, symposium schedules, other central
+  banks' policy rates, government funding status) from memory or from the
+  prompt's own framing — verify it fresh from a primary source
+  (federalreserve.gov, bankofengland.co.uk, boj.or.jp, kansascityfed.org,
+  norges-bank.no, riksbank.se, banxico.org.mx, snb.ch, rba.gov.au,
+  whitehouse.gov, etc.) every edition, exactly like any other data point.
+  These are the rates and dates that feed Section 3's policy-rate table, so
+  the table is the natural place to land them. **The BoE's next decision
+  (Thursday 5 November 2026) was freshly re-confirmed again at edition 48**
+  via a direct bankofengland.co.uk fetch (both the Bank Rate level, 3.75%,
+  and the next-MPC-date page) — unchanged, now confirmed directly for ten
+  straight editions (39-48). **The shutdown/CR status check's broken URL
+  streak was fixed at edition 48**: a new, clean, working whitehouse.gov URL
+  was found (`whitehouse.gov/briefings-statements/2026/09/congressional-bill-h-r-6500/`
+  — titled "Congressional Bill H.R. 6500 Signed into Law," confirms funding
+  "through December 11, 2026") — **standardize on this URL going forward**
+  rather than the pre-edition-47 pattern that broke. **The BoJ's
+  next-meeting-date (Oct 29-30, 2026) was confirmed at edition 48 via an
+  explicit, dedicated direct fetch** of `boj.or.jp/en/mopo/mpmsche_minu/index.htm`
+  (which explicitly lists "Monetary Policy Meeting for October 29 (Thu.) and
+  30 (Fri.), 2026," plus the Outlook Report, Summary of Opinions and Minutes
+  dates) — this closes the 3-edition-open thread asking for an unambiguous
+  dedicated fetch. **Edition 48 again could not get a direct numeric read of
+  the current BoJ policy rate itself (approx. 1.25%)** — the Sept 2026
+  statement documents remain PDF-only and return undecodable compressed
+  (FlateDecode) data; this numeric-rate gap is now **four straight editions
+  (45-48)** — try a dedicated rate-specific HTML page (not a statement PDF) at
+  edition 49, or an English-language BoJ FAQ/data-statistics page, since the
+  PDF approach has now failed four times running. **New at edition 48:
+  Riksbank's primary URL (riksbank.se) returned 404** on the page previously
+  used for its policy rate — the 1.75% figure is carried from secondary
+  corroboration only this edition; re-establish a working riksbank.se URL at
+  edition 49. **New at edition 48: the ECB's current policy rate could not be
+  freshly confirmed** — search results showed conflicting figures (2.00% vs.
+  2.40%) across sources of different vintages; the ECB is excluded from this
+  edition's policy-rate table pending a clean direct ecb.europa.eu fetch.
+- **SETTLED — Bank of England held at 3.75% on Thursday 17 Sept 2026, a 6-3
+  vote**
+  (same three dissenters as 30 July, all favoring a hike to 4.00%) — resolved,
+  does not need re-confirming again unless a new decision date has passed.
+  **Next BoE decision: Thursday 5 November 2026** — re-confirmed directly
+  again at edition 48 (following decision 17 December 2026). Continue the
+  direct-fetch discipline given the meeting is now under two weeks out.
+- **SETTLED (the September decision only) — Bank of Japan hiked 25bp to
+  approx. 1.25% on 18 September 2026**
+  (effective 24 Sept), a 31-year high, a 7-2 vote (dissenters Asada Toichiro
+  and Sato Ayano), both primary-sourced as of edition 37 — closed thread, do
+  not re-derive. **The next policy meeting date (Oct 29-30, 2026) is now
+  confirmed via an explicit dedicated direct fetch as of edition 48** — see
+  the general-principle entry above for both this and the still-open
+  numeric-rate gap (four straight editions, 45-48).
+- **SETTLED — the four-central-bank Thursday 24 September 2026 cluster,
+  closed thread, do not re-open:** Norges Bank hiked 25bp to 4.50%
+  (hawkish surprise); Riksbank held at 1.75% but signalled a greater chance of
+  a Q4 hike; Banxico held at 6.50% unanimously; SNB held at 0% and raised its
+  inflation forecasts, confirmed directly against snb.ch.
+- **SETTLED — the Reserve Bank of Australia's Tuesday 29 September 2026
+  decision, closed thread, do not re-open:** hiked 25bp to **4.60%,
+  unanimous**, a 15-year high and its fourth hike of 2026, confirmed directly
+  against rba.gov.au's own Statement by the Monetary Policy Board at edition
+  47. **Edition 48's reconfirmation traced to secondary (wire) reporting
+  rather than a fresh rba.gov.au direct fetch** — re-establish the direct
+  fetch at edition 49 for the current-rate table cell, even though the
+  underlying September decision itself remains closed/settled.
+- **August 2026 PCE inflation — closed thread, resolved at edition 32, do not
+  re-open:** headline +0.3% m/m/+3.4% y/y, core +0.2% m/m/+3.0% y/y — a clean
+  disinflation signal that proximately triggered edition 32's October-hike-odds
+  collapse.
+- **September 2026 jobs report — closed thread since edition 34, do not
+  re-derive, but watch for revisions in later BLS releases:** nonfarm payrolls
+  +29,000 (the weakest print of the cycle) vs. approx. 84,000-90,000
+  consensus; unemployment rate 4.2%; average hourly earnings +0.1% m/m /
+  +3.0% y/y; July revised to -10,000, August revised to +133,000 (a combined
+  -60,000 revision), confirmed directly against bls.gov's Employment
+  Situation Summary.
+- **September 2026 ISM Services/Non-Manufacturing PMI — closed thread as of
+  edition 35, do not re-derive:** headline 54.9% (down from August's 55.4%),
+  Prices Paid 74.0% (+1.4pt, highest since July 2022). Confirmed directly
+  against ISM's own press release.
+- **September 2026 US CPI — closed thread as of edition 42, do not re-derive:**
+  headline **+0.6% m/m / +3.7% y/y**, core **+0.3% m/m / +2.6% y/y**, both
+  above the Dow Jones consensus of approx. 3.6%/2.5%, confirmed directly
+  against bls.gov's CPI Summary release. This was the proximate trigger for
+  edition 42's broad equity selloff, VIX spike and sharp October-hike-odds
+  repricing.
+- **September 2026 US PPI — closed thread as of edition 43, do not
+  re-derive:** final demand **+1.3% m/m / +6.3% y/y** (NSA), the largest
+  monthly gain since March 2022 and largest 12-month rise since December
+  2022; the trade-services-excluded measure (BLS's closest analog to "core,"
+  since BLS's September release does not publish a conventional ex-food/
+  -energy PPI) was +0.5% m/m / +5.0% y/y. Energy (+10.8% m/m, gasoline
+  +20.3%) drove over 80% of the goods-side increase. Confirmed directly
+  against bls.gov.
+- **September 2026 Import/Export Price Indexes — closed thread as of edition
+  44, do not re-derive:** import prices **+1.1% m/m / +8.1% y/y** (the
+  largest 12-month increase since July 2022), export prices **+2.2% m/m /
+  +11.6% y/y**; export prices to China specifically +2.7% m/m (largest
+  monthly rise since March 2022) / +7.5% y/y, import prices from China +3.1%
+  y/y. Released Friday 16 October 2026, 8:30am ET, confirmed directly
+  against bls.gov.
+- **September 2026 Industrial Production & Capacity Utilization (G.17) —
+  closed thread as of edition 44, do not re-derive:** total industrial
+  production **+0.7% m/m / +2.2% y/y**, manufacturing output +0.3% m/m/+1.1%
+  y/y, capacity utilization **76.9%**. Released Friday 16 October 2026,
+  9:15am ET, confirmed directly against federalreserve.gov's G.17 release.
+  The Fed flagged an annual benchmark revision to this series due 24 November
+  2026 — watch for a level reset around that date, not a genuine month-over-
+  month signal.
+- **No US federal government shutdown is in effect — re-confirmed at edition
+  48 via a newly re-established, cleanly fetchable whitehouse.gov URL (see
+  the general-principle entry above).** H.R. 6500 funds federal agencies
+  through **11 December 2026**. Watch for shutdown risk resurfacing as that
+  date approaches.
+- **University of Michigan preliminary October 2026 consumer sentiment —
+  still not a "closed thread," final reading due immediately after this
+  edition's window:** preliminary 46.3, a five-month low (current conditions
+  44.7, expectations 47.3, year-ahead inflation expectations 4.7%, long-run
+  3.5%), confirmed via investinglive.com and advisorperspectives.com, both
+  dated 9 Oct 2026. **Final October reading due Friday 23 October 2026,
+  10:00am ET** — this falls just after edition 48's window closed (Thu 22 Oct
+  20:20 ET), so it was not yet released; **edition 49 should watch for it
+  directly if its window reaches Friday 23 Oct.**
+- **China September 2026 CPI/PPI — RESOLVED at edition 42, closed thread, do
+  not re-derive:** CPI **+0.9% y/y** (+0.2% m/m), PPI **+5.0% y/y** (the
+  fastest PPI rise since June 2022), driven by fuel costs. Sourced to gov.cn's
+  English-language NBS-attributed news release (stats.gov.cn itself remained
+  stale/unreachable) — continue treating the gov.cn English release as an
+  acceptable near-primary substitute if stats.gov.cn remains unreachable.
+  China's October PMI is due approx. 31 October 2026, now about a week out.
+- **China Q3 2026 GDP — RESOLVED at edition 45, closed thread, do not
+  re-derive:** printed **Monday 19 October 2026**, settling edition 44's
+  disputed release-date (19 vs. 20 Oct) in favor of the 19th, confirmed
+  directly against the National Bureau of Statistics' English-language press
+  release at stats.gov.cn. Q3 alone: **+4.5% y/y, +1.2% q/q**; first-three-
+  quarters 2026 cumulative: **+4.6% y/y** (GDP RMB 107,107.1bn).
+- **New Mexico v. Meta — a $25bn civil-penalty ruling was reported, multi-
+  sourced, at edition 47 (Judge Francis Mathew, Wednesday 21 Oct 2026); a
+  narrower open sub-question remains, now carried two editions.** Meta owes
+  **$25bn** in civil penalties for the jury's late-September verdict (Meta
+  violated the state's Unfair Practices Act roughly 43.9 million times, re:
+  hate-speech policy and its Cambridge Analytica response) — above the
+  48-other-state, $18bn settlement Meta already reached elsewhere, but well
+  below New Mexico's $35-40bn ask and the $219.5bn theoretical statutory
+  maximum. Meta has said it will appeal. **Still open at edition 48: whether
+  the 9 October stay of enforcement (granted on Meta's unopposed motion)
+  carries over to this specific $25bn judgment, and whether Meta has filed
+  its formal notice of appeal** — a fresh attempt at edition 48 again could
+  not confirm either point (general search-index lag affected this specific
+  research pass; not treated as evidence the story has gone cold). This is a
+  distinct proceeding from the March 2026 child-safety jury verdict ($375m,
+  before a different judge, Bryan Biedscheid) and the August 2026 abatement
+  ruling ($567m, same Biedscheid case, under appeal) — don't conflate the
+  three. Also distinct from Meta's own Q3 2026 earnings charge: a separate
+  $9.89bn one-time charge tied to an **August 2026, 52-state-AG** teen-safety
+  settlement that explicitly excludes New Mexico (which pursued its own
+  litigation) — don't conflate the nationwide settlement with the New Mexico
+  judgment.
+- **New calendar-awareness item from edition 40, reconfirmed relevant at
+  edition 41: "equities-open, bonds-closed" US holidays need an explicit
+  check every time they land in the window, not an assumption from memory.**
+  Monday 12 Oct 2026 was Columbus Day — NYSE/Nasdaq traded a normal full
+  session but the Treasury cash market and SOFR/EFFR/OBFR fixings were
+  closed. **Next candidate to verify when it lands: Veterans Day, Wed 11 Nov
+  2026 — confirm whether that is also bonds-only before assuming.**
+- **New calendar item from edition 48: Bank of Canada's next decision is
+  Wednesday 28 October 2026, 9:45am ET — the same day as the FOMC decision.**
+  Found via secondary calendar sources only, not yet independently
+  primary-sourced against the Bank of Canada's own site — do so at edition 49
+  if bandwidth allows, since it now overlaps directly with the FOMC-week
+  coverage.
+- **The vendor-retroactive-revision trap recurred again at edition 48, but
+  narrowed back to gold/silver only** (versus edition 47's five-instrument
+  gold/silver/DXY/EUR-USD/USD-JPY cluster). Re-fetching Wednesday 21 Oct's
+  closes from the same vendor (Investing.com) at edition 48 found: gold
+  $4,142.40→$4,150.00 (+0.18pp), silver $57.590→$57.710 (+0.21pp) — both
+  shifted again, in the same upward-revision direction as edition 47's
+  gold/silver instance. **By contrast, EUR/USD and USD/JPY reconciled to
+  within a sub-pip of this report's edition-47-logged Wednesday bases**
+  (EUR/USD 1.1234→1.1233, USD/JPY 158.15→158.14) — effectively a clean
+  reconciliation, not a repeat of edition 47's shift for those two pairs.
+  GBP/USD and the Treasury curve again reconciled exactly. Copper could not
+  be checked against this specific trap this edition since its primary
+  source (westmetall.com) was down and a different vendor (COMEX futures)
+  had to be substituted entirely — see the dedicated copper entry below.
+  **Recommendation reinforced yet again: fresh-refetch every commodity/FX/
+  Treasury prior-session base from the same vendor table every single
+  edition — not just the instruments that drifted last time.** The locus
+  keeps rotating or narrowing (WTI at 45, gold/silver/nat-gas at 46,
+  gold/silver/DXY/EUR-USD/USD-JPY at 47, gold/silver only at 48); the
+  Treasury curve remains the one instrument class that has never shown this
+  trap across every edition checked.
+- **New, significant sourcing break at edition 48: LME copper's primary
+  source (westmetall.com) is unreachable** — a direct fetch returned a TLS
+  "certificate expired" error, and the bare domain served a generic Plesk
+  parking page (Last-Modified: Nov 2020), suggesting a hosting/domain lapse
+  rather than a transient outage. This breaks a 26-edition clean streak.
+  **COMEX copper futures (via Investing.com) were used as a disclosed
+  substitute this edition** (-2.67% to approx. $14,120/tonne,
+  COMEX-equivalent, not directly comparable to an LME quote). **Re-attempt
+  westmetall.com at edition 49 to determine whether this was transient (e.g.
+  a lapsed certificate renewal) or a permanent loss of this source** — if
+  still down, consider formally adopting COMEX as the standing fallback
+  rather than treating it as a one-off substitute.
+- **Henry Hub natural gas: the OHLC internal-consistency issue that recurred
+  across several recent editions (e.g. edition 47's reported "open" above
+  "high") was NOT present at edition 48** — both Wednesday and Thursday rows
+  had open/close within the stated low/high range. The front-month-identity
+  question remains resolved via the TradingView-expiry-calendar technique
+  (edition 47; NGX6/November 2026 is front-month through its 28 Oct 2026
+  expiry). Continue treating this instrument's price-data quality as
+  requiring a fresh check every edition despite this edition's clean read —
+  it has been unstable too many times to assume it is now fixed.
+- **The Kitco live-spot-vs-headline cross-check was resumed at edition 48**
+  after several editions of non-attempt — it found no conflict: gold spot sat
+  approx. 0.5% and silver spot approx. 0.6% below their respective futures
+  closes, both consistent with a normal futures/spot basis rather than a
+  sourcing discrepancy. Continue attempting it each edition when research-
+  pass timing allows a same-day check.
+- **Bending Spoons (ticker BSP) is a legitimate new name, not a data error,
+  if it recurs as a single-stock mover:** a Nasdaq Global Select
+  Market-listed Italian software holding company (owns AOL, Evernote,
+  WeTransfer, Issuu and other consumer/SaaS apps), IPO'd 1 July 2026 at
+  $29/share (above its $26-28 range), rising approx. 41% on debut to a
+  approx. $25bn market value. Logged here so a future edition doesn't waste
+  effort re-verifying the ticker's legitimacy if it moves sharply again.
+- **The "named secondary outlet's own percentage-move headline can be flatly
+  wrong" trap (first logged edition 44, J.B. Hunt/FreightWaves) remains a
+  standing caution.** AT&T's exact Wednesday 21 Oct close (-6.45% per
+  stockanalysis.com vs. a third-party archive's -6.1%) remains unresolved at
+  edition 48 as well — now carried two editions as an open, single-source
+  conflict (Annex A each time until resolved).
+- **A reinforcing, non-novel reminder, reinforced hard again at edition 48:
+  premarket/regular-session-close is not the after-hours earnings reaction,
+  and the two can diverge sharply — and, new this edition, an after-hours
+  reaction does not necessarily hold, extend, or reverse uniformly across a
+  multi-name reporting cluster into the next regular session.** Edition 47's
+  megacap quadfecta (Meta, Tesla, IBM, Texas Instruments, all reporting after
+  Wednesday 21 Oct's close) resolved four different ways by Thursday 22 Oct's
+  close: Meta's disputed Wednesday AH figure (+2.16% vs. +4%) was rendered
+  moot by an unambiguous Thursday regular-session close of -6.98%; IBM, which
+  had fallen -4.63% after hours Wednesday on narrow margins, ended Thursday
+  essentially flat (+0.26%, no further extension either way); Tesla (-3.08%)
+  and Texas Instruments (-1.81%) both extended their Wednesday after-hours
+  direction into Thursday's regular session. **Lesson: when a same-aggregator
+  after-hours quote dispute can't be resolved by a wire service, the next
+  regular session's close can resolve it operationally even if it never
+  resolves the historical after-hours print — but don't assume every name in
+  a reporting cluster will behave the same way into the next session.**
+  Always fetch and separately label the regular-session close vs. the
+  after-hours reaction, and check the next session's close before assuming
+  an after-hours move has "held."
+- **The DXY-vs-its-own-FX-crosses conflict is genuinely intermittent, but has
+  now agreed for a fourth straight session (45-48).** DXY fell -0.21% and
+  USD/JPY fell -1.01% Thursday 22 Oct, both negative — directionally agreeing
+  for a fourth straight session. Keep disclosing the comparison every edition
+  regardless of which way it goes, and keep watching whether this becomes
+  the norm rather than staying truly intermittent.
+- **The single-aggregator-dependence pattern continued at edition 48 in a
+  worse-than-edition-47 form: neither AP's wire nor Reuters' updated wrap was
+  indexed/fetchable for Thursday 22 Oct by cutoff** (edition 47 at least had
+  AP's wire post, just blocked for direct automated fetch). A new fallback
+  combination was used instead: stockanalysis.com's ETF-proxy data
+  (SPY/DIA/ONEQ/QQQ/IWM) cross-checked against a direct-index snapshot from
+  fool.com (^GSPC/^DJI) — both reconciled tightly against Wednesday's logged
+  closes. **fool.com is logged here as a new, apparently reliable
+  direct-index-snapshot source worth trying again** when AP/Reuters aren't
+  available; ONEQ (Fidelity Nasdaq Composite Index Tracking Stock) is logged
+  as the standing ETF-proxy choice for the Nasdaq Composite specifically
+  (distinct from QQQ, which tracks the Nasdaq-100) — but note neither
+  Nasdaq Composite nor Russell 2000 had a direct-index-snapshot cross-check
+  this edition, so those two levels remain ETF-proxy-derived only, not
+  independently confirmed. Much of the earnings-heavy equities section still
+  traces predominantly to stockanalysis.com and SEC EDGAR filings rather than
+  a wire service — appropriate given SEC filings are primary sources, but
+  continue disclosing the sourcing tier explicitly.
+- **A non-GAAP-vs-GAAP EPS conflict trap was logged for the first time at
+  edition 38** — when a secondary-sourced EPS figure conflicts sharply with
+  a primary filing's GAAP number without a stated basis, prefer the primary
+  filing and flag the secondary figure in Annex A. **Edition 48 logged
+  another clean confirmation via Meta's own Q3 2026 8-K**: GAAP diluted EPS
+  $3.83 vs. adjusted (ex. a $9.89bn one-time legal-settlement charge) $7.40,
+  both disclosed clearly in the filing — reported in full per the established
+  precedent, not treated as a conflict.
+- **The "preview-consensus-only miss/beat framing" caution (first logged at
+  edition 41) remains an open, unconfirmed disclosed inference, not
+  re-chased at edition 48 either.** Pick this thread back up at a future
+  edition if bandwidth allows.
+- **Equifax's unexplained-magnitude rally is now a three-session, approx.
+  +18% cumulative open thread, not yet chased for a specific catalyst.**
+  First logged at edition 46 (+11.33% Tue 20 Oct), flat Wednesday 21 Oct
+  (-0.55%), then +6.59% again Thursday 22 Oct — no analyst upgrade, news
+  item or dated SEC filing has been found at any point across three editions
+  to explain the magnitude. Genuinely worth a dedicated search attempt at
+  edition 49 if bandwidth allows, given the cumulative size has grown
+  notable.
+- **MillerKnoll's and Opendoor's Wednesday 21 Oct declines (each with an
+  identified same-day 8-K that didn't fully explain the magnitude, logged at
+  edition 47) both fully reversed on Thursday 22 Oct** (MillerKnoll +7.22%,
+  Opendoor +3.59%) with no new corroborating catalyst found for either
+  session's move. Logged as a closed-enough pattern (reversal, no new
+  information) rather than an actively chased open thread going forward.
+- **New at edition 47, reinforced at edition 48: when standard "biggest
+  movers" aggregator pages aren't retrievable, SEC EDGAR's full-text search
+  for same-date 8-K filings is an effective, primary-source-grounded
+  discovery/verification method** — used again at edition 48 to pull Meta's,
+  Lockheed Martin's and Procter & Gamble's own Q3 2026 filings directly
+  rather than relying solely on secondary aggregator coverage.
+- **A megacap multi-name earnings cluster reporting on the same evening can
+  produce genuinely uncorrelated reactions, both at the after-hours stage
+  (edition 47) and again at the next-regular-session stage (edition 48) — see
+  the dedicated premarket-vs-AH entry above for the full edition-48
+  write-up.**
+
+## Role framing
+Write as a top-tier economist / equity, commodity and derivatives investor,
+sector-agnostic. Plain English. Single-stock focus (see coverage below).
+
+## Coverage and weighting
+Single stocks are the centre of gravity. Weight roughly: **~45% single
+stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
+1. **US equities & earnings (LEAD, largest section)** — index closes, sector
+   rotation, single-stock movers, earnings since last cutoff, guidance
+   changes, analyst actions. **Bias name selection toward:** Technology,
+   SaaS/software, consumer staples, consumer discretionary, telcos, and
+   large industrials. This is the section the user reads first — give it the
+   most column space and the most "why it moved / read-across" depth.
+2. **Macro & policy (condensed)** — keep only macro that plausibly moves
+   single stocks or sectors: inflation prints, jobs, the Fed rate path,
+   major central-bank and trade/tariff decisions, and the day-ahead calendar
+   with consensus. Drop general-interest macro colour with no equity
+   read-through.
+3. **Commodities & FX (trimmed)** — oil, gas, gold, copper; DXY and major
+   crosses. **No soft commodities/agriculture** (no corn/wheat/soybeans/
+   WASDE — user not interested). Hard assets and FX only.
+4. **Derivatives & positioning (condensed further)** — VIX and vol term
+   structure, options flow/single-stock gamma or skew, CFTC CoT, funding in
+   one line. **No credit spreads** (IG/HY OAS, issuance — user not
+   interested).
+
+## Confirmed format (locked)
+- **Length:** 3 pages of briefing + 1-page annex. Do not exceed.
+- **No "So what" lines.** Interpretation lives in the 60-second read at the
+  top, and inline only where a number is meaningless without it — never as a
+  standalone labelled line.
+- **Sources:** numbered inline references `[n]` in a small blue superscript
+  span, full list in Annex B. Never inline URLs in the body. **Each citation
+  number gets its own `<sup class="ref">[n]</sup>` tag** — do not write
+  `[26][27]` inside one sup tag; write `<sup class="ref">[26]</sup><sup
+  class="ref">[27]</sup>`. `check_refs.py`'s regex only matches one bracket
+  per sup tag, so combined-bracket citations silently fail the cross-check.
+  Note that bracket text baked into a chart PNG's axis label (e.g. `[6]`) is
+  NOT scanned by `check_refs.py` (it only reads the HTML, not image pixels) —
+  keep those numbers consistent with Annex B by hand; the tool can't catch a
+  mismatch there. **Also watch for a stray bracket typed outside a `<sup>`
+  tag entirely** — `check_refs.py` will not flag it since its regex only
+  matches inside `sup class="ref"` tags, so a bare `[n]` slips through
+  silently. Proofread citation-heavy sentences visually, not just via the
+  script, when a sentence carries two or more consecutive citations. A
+  related trap, worth naming explicitly: placeholder ref text (e.g.
+  `[note1]`) typed during drafting and never swapped for a real number.
+  `check_refs.py`'s regex requires `\d+` inside the brackets, so a
+  non-numeric placeholder simply won't match either the inline or Annex-B
+  regex — it won't show up as "missing" or "unused," it just silently
+  doesn't count. **Never use a letter suffix to disambiguate a citation —
+  always mint a new integer.** Annex B numbers do not need to be contiguous,
+  only matched 1:1 against inline citations — deleting an unused reserved
+  number and leaving a gap is completely fine and simpler than renumbering
+  everything after it. **Reusing the same Annex B number for multiple
+  movers/figures citing the same outlet/method is fine and recommended** —
+  `check_refs.py` only checks presence/absence, not uniqueness of use
+  (editions 33-48 have all done this for stockanalysis.com single-stock
+  closes and other repeatedly-used outlets, confirmed stable across fifteen
+  editions; edition 47 reused one shared Annex B number across thirteen
+  different companies' SEC EDGAR 8-K filings, and edition 48 reused its SEC
+  EDGAR number across four different filers — use this same-method,
+  different-document reuse pattern whenever a single day has many
+  primary-source filings of the same type). **Citing the prior edition
+  itself as a source** (e.g. "[7] Daily Economic Briefing, edition 47,
+  logged prior-session baseline figures") is a legitimate, already-used
+  pattern when disclosing a divergence against a previously-logged figure —
+  editions 43 through 48 have all done this cleanly with `check_refs.py`.
+- **Structure:** 60-second read (5 ranked items) → 1 Market recap → 2
+  Equities and earnings (LEAD) → 3 Macro, policy and rates (condensed;
+  policy-rate table + prose, see the next bullet) → 4
+  Commodities and FX (hard assets + FX only) → 5 Derivatives, volatility and
+  positioning (condensed, no credit) → 6 The day ahead → Annex A (what could
+  not be verified) → Annex B (sources) → Method note. **Do not duplicate the
+  day-ahead calendar as both a prose paragraph (e.g. at the end of Section 3)
+  and the Section 6 table — edition 47's first draft did exactly this and it
+  was the single largest contributor to a 5-page overflow; Section 6's table
+  is the one and only place the day-ahead calendar belongs.**
+- **Section 3 carries a central-bank policy-rate table.** Other central
+  banks' rates in a paragraph are the least readable thing in the document;
+  put the levels in a table and keep the prose for what a table cannot hold.
+  Columns: **Central bank | Policy rate | Last change | Next decision**. The
+  Fed goes first as the anchor to compare against, then whichever of the
+  BoE, BoJ, ECB, SNB, Norges Bank, Riksbank, RBA, BoC and Banxico the window
+  actually touches — eight to ten rows is the working range. A bank whose
+  current rate could not be verified still gets its row, with that cell
+  marked unavailable and a matching Annex A entry; dropping the row hides the
+  gap instead of disclosing it (though note: a bank that has genuinely never
+  been part of this report's working rotation, like the ECB before edition
+  48, can be reasonably left out rather than added fresh with an unresolved
+  figure — edition 48 excluded the ECB for exactly this reason; use
+  judgment). **This replaces the prose that used to carry those levels, it
+  is not added on top of it** — Section 3's prose keeps what moved inside
+  the window, vote splits, and the divergence that matters, so net page
+  impact should be roughly neutral. If page 3 overflows anyway, cut rows
+  that had no news in the window before cutting any prose. Follow the usual
+  table convention — plain `<tr>` header rows, no `<thead>`.
+- **Charts:** 2 per edition, neither duplicating a table. Keep the
+  single-stock movers bar chart. Pick chart 2 by what the day's dominant
+  story actually is (see Chart #2 guidance under Production notes). **Chart
+  placement is editorial, not fixed to Section 2** — editions 24, 34, 39 and
+  44 all placed a CFTC-positioning chart #2 in Section 5 (Derivatives) rather
+  than Section 2, since that's where the content actually belongs; editions
+  45 through 48 all reverted to the sector-ETF-proxy default in its usual
+  Section 2 placement since no fresher CFTC data was due inside any of those
+  windows (next report Fri 23 Oct, covering Tue 20 Oct data — should be
+  fresh for whichever edition's window extends past 3:30pm ET that day,
+  likely edition 49).
+- **Tilt:** market-wide. No portfolio tilt, no holdings commentary.
+- **Window:** everything since the previous edition's cutoff. On Mondays
+  (or after any gap) this includes the weekend/missed sessions.
+- **Data gaps:** keep Annex A. State plainly what could not be verified.
+  Never estimate, infer, or fill from memory.
+- **Page margins:** 1 inch (25.4mm) top and bottom, 13mm left and right.
+- **Text alignment:** body prose (paragraphs, bullet lists) justified.
+  Tables, headers (h1/h2/h3), the snap-grid tiles, the meta line, and Annex
+  B's narrow 3-column source list stay left-aligned — justifying short table
+  cells or a dense multi-column list produces ugly ragged spacing.
+
+## Hard rules
+- Every data point needs a named source. If unverifiable, say so in Annex A
+  rather than producing a plausible-sounding number.
+- Where sources disagree, use the more authoritative one **and** disclose
+  the disagreement. AP's "How major US stock indexes fared" and the Reuters
+  market wrap are normally the most reliable for index closes — but check
+  they're actually indexed for the target date before relying on them; this
+  has occasionally failed to post in time, or blocked direct automated fetch
+  even when it did post. **Edition 48 found a worse variant: neither wire was
+  indexed/fetchable at all** — fall back to secondary outlet(s) + ETF-proxy
+  triangulation (plus, new at edition 48, a direct-index-snapshot source like
+  fool.com if available) when AP/Reuters genuinely haven't posted or can't be
+  fetched directly, and disclose the fallback explicitly every time.
+- Watch for date confusion: aggregators routinely republish the prior
+  session's data under the current date. Verify the session date on every
+  figure. **Edition 44 found a new, stronger version of this trap: a
+  FreightWaves headline's percentage-move claim for J.B. Hunt was not just
+  mistimed but flatly contradicted by the stock's own verified close.**
+  Always check a dated article's own claimed magnitude against the
+  underlying price-history table, not just its date, before repeating it.
+  **Edition 45 found a related but distinct trap: a single aggregator's own
+  writeup can be internally self-contradictory. Edition 47 found a further
+  variant: the SAME aggregator can show two DIFFERENT numbers for the SAME
+  quote** (Meta's after-hours move) — check a page's own quote box against
+  its own embedded headlines/news feed, not just against other aggregators,
+  before citing a single figure. **Edition 48 showed a workable resolution
+  path for this specific trap: when a same-session AH dispute can't be
+  resolved by a wire, the NEXT regular session's unambiguous close can
+  operationally supersede it** — see the dedicated Standing Facts entry
+  above.
+- Run a dedicated verification pass on any figure two research passes
+  disagree on before publishing — cheap, and has caught real errors before.
+  **Edition 48 continued this discipline**, individually verifying
+  single-stock closes directly against stockanalysis.com and cross-checking
+  SEC EDGAR 8-Ks for the session's primary earnings movers (Meta, Lockheed
+  Martin, Procter & Gamble), and separately re-fetching all 11 SPDR sector
+  ETFs directly.
+- **Premarket is not the close, and the close is not the after-hours
+  earnings reaction — and an after-hours reaction does not necessarily hold
+  into the next regular session, uniformly or at all.** Reinforced explicitly
+  at editions 44, 47 and again at 48 (see the dedicated Standing Facts entry
+  above) — Wednesday 21 Oct's megacap quadfecta resolving four different ways
+  by Thursday 22 Oct's close is the clearest example logged to date. Always
+  fetch the verified close, the after-hours reaction, AND (when the window
+  allows) the next regular session's close as three separate, clearly
+  labelled figures.
+- **The DXY-vs-its-own-FX-crosses conflict is genuinely intermittent but has
+  now agreed for four straight editions (45-48)** — see Standing Facts entry
+  above. Continue disclosing the DXY-vs-USD/JPY directional comparison
+  explicitly every edition regardless of which way it goes, and watch
+  whether the agreement streak is becoming the new norm.
+- **The Kitco live-spot-vs-headline cross-check was resumed cleanly at
+  edition 48, no conflict found** — see the dedicated Standing Facts entry
+  above. Continue attempting it each edition when research-pass timing
+  allows a same-day check.
+- **GBP/USD reconciled cleanly for a fourth straight edition (45-48); the
+  vendor-revision trap narrowed back to gold/silver only at edition 48**
+  (after hitting a five-instrument cluster including DXY/EUR-USD/USD-JPY at
+  edition 47) — EUR/USD and USD/JPY both reconciled to within a sub-pip this
+  time. See the dedicated Standing Facts entry above. Resume the fuller
+  multi-source method on any FX/commodity pair if a fresh same-day conflict
+  reappears.
+- **The 2-year Treasury yield conflict from edition 36 has stayed resolved
+  for twelve further editions (37-48)** — edition 48 again found the full
+  Treasury curve the one instrument class that reconciled perfectly against
+  the prior edition's logged base and against Trading Economics. Treat as
+  resolved/noise unless a fresh conflict appears.
+- Cross-check every inline `[n]` reference against Annex B (and vice versa)
+  programmatically (compare sorted sets) rather than eyeballing it once
+  source counts climb past ~30. **Run `check_refs.py` before, not just
+  after, calling it done.** Editions 33 through 48 have all run clean (or
+  clean after one quick fix) — **edition 48 ran clean on the first pass**,
+  24/24.
+- Run `grep -c '~' briefing.html` before rendering (expect 0) — write
+  "approx." from the start rather than typing `~` and cleaning up after.
+  **Editions 29 through 48 have all rendered with zero stray tildes on the
+  first draft.**
+  **Reminder: `grep -c` exits with status 1 (not 0) when the count is zero,
+  since no lines matched — don't chain it with `&&` into a longer command
+  and assume a silent failure means the check itself failed; read the
+  printed count, not just the exit code.**
+- **When a chart needs a normalized/relative figure (e.g. "% of open
+  interest") and the underlying denominator can't be sourced, use a
+  different, honestly-labelled normalization rather than dropping the chart
+  or fabricating the missing figure.** Editions 34, 39 and 44 have all
+  resolved this cleanly for CFTC CoT, with full OI and Asset-Manager/
+  Leveraged-Funds breakdowns for ES, NQ and RTY. **Edition 48 confirmed
+  directly (cftc.gov's `financial_lf.htm`) that no new report has posted
+  since Friday 16 October** (still Tuesday 13 Oct's figures: ES OI 1,931,607,
+  AM net approx. +47%/LF approx. -21%; NQ OI 279,515; RTY OI 444,784,
+  unchanged, as expected). **The next CFTC report is due Friday 23 October
+  2026, 3:30pm ET, covering Tuesday 20 October data** — check cftc.gov
+  directly at edition 49 if its window extends past that release time (very
+  likely for most plausible edition-49 cutoffs, and especially relevant given
+  this week's tech-selloff positioning angle), and re-evaluate chart #2
+  (fresh CFTC vs. sector-ETF-proxy default) based on what's actually
+  available.
+- **The diffuse-overflow lesson from editions 44-45 and the duplicated-
+  content lesson from edition 47 are both still worth checking first on any
+  overflow** — edition 48 rendered clean at 4 pages on the first attempt with
+  no trims needed, but if a future edition overflows, check for duplicated
+  content across sections before diffuse trimming; it has twice been the
+  larger, single-fix win.
+- **Movers-chart outlier capping:** cap an extreme outlier bar at a fixed
+  axis max with a value-label annotation only when one mover is a genuine
+  order of magnitude larger than the rest — **specifically, when the RATIO
+  between the largest and second-largest mover crosses approx. 5x, not when
+  the largest mover's raw magnitude looks large in isolation.** Edition 48
+  again confirmed this is routinely NOT triggered: the largest mover
+  (MillerKnoll +7.22%) was only approx. 1.04x the second-largest (Lockheed
+  Martin +6.96%), and META's -6.98% was comparable in magnitude too — no
+  capping needed, consistent with most editions' spreads.
+
+## Known-hard-to-source (expect to mark unavailable, or use the workaround below)
+- **VVIX, VIX9D, VIX6M, SKEW, MOVE index, CBOE daily put/call ratio:** try
+  CBOE's own `cdn.cboe.com` (redirects to `cdn-api.cboe.com`) delayed-quotes
+  JSON endpoint first — it often returns VIX, VIX9D, VIX3M, VIX6M, VVIX and
+  SKEW directly. Note the correct symbol format requires a leading
+  underscore in the path (e.g. `_VIX.json`) — a bare `VIX9D.json` etc.
+  returns 403 AccessDenied. **Editions 28 through 48 all got a fresh,
+  same-day-timestamped sweep** — twenty-one consecutive fresh sweeps now,
+  including a full six-series sweep (VIX, VIX9D, VIX3M, VIX6M, VVIX, SKEW)
+  every time since edition 47. **The feed's two known bugs (a duplicated
+  `prev_day_close`, and a `price_change_percent` that divides by current
+  price instead of prior close) are genuinely intermittent, not a one-way
+  ratchet** — edition 48 saw neither bug on any series, extending the
+  bug-free run. **Always compute day-over-day % change manually regardless
+  of how many consecutive bug-free reads preceded the current one.** Edition
+  48 saw a genuine, sizeable VIX pop (+14.09% to 19.03) with the term
+  structure staying in contango throughout (VIX9D 18.86 < VIX 19.03 < VIX3M
+  20.12 < VIX6M 21.66) — an event-driven (earnings-related) vol spike rather
+  than systemic stress.
+- **Dated GICS 11-sector tables / same-day sector performance:**
+  Stockanalysis.com's ETF price-history pages return same-day closing price
+  and % change for the SPDR Select Sector ETFs — the standing default for
+  the sector table/chart. **Edition 48 fetched all 11 directly as the
+  default method from the start** (Consumer Staples +3.31% the clear leader
+  on Procter & Gamble's beat, Technology -3.29% the clear laggard on Meta's
+  reversal; 6 of 11 green) — continue this direct-fetch-by-default method.
+- **NYSE/Nasdaq closing breadth:** not obtainable as an official statistics
+  table; Reuters' final wrap drops the breadth block. Mark unavailable for
+  the formal table; the "X of 11 sectors closed higher" sector-ETF read
+  remains the best available breadth proxy (6 of 11 at edition 48) —
+  continue treating an uncorroborated single-aggregator breadth figure as
+  not usable.
+- **Dealer gamma:** zerogex.io hit a **ninth consecutive edition of failure
+  at edition 48** (the same populated-landing-page/placeholder-dash mode as
+  prior editions). SpotGamma logged a **third straight failure at edition
+  48**, now confirmed precisely as a client-side React single-page app with
+  zero server-rendered data behind its dashboard.spotgamma.com login. Both
+  sources remain fully unusable.
+- **Official CME FedWatch probabilities:** the page blocks fetching (edition
+  48's direct attempt timed out again, an **eighth** consecutive failure,
+  41-48) — use secondary citations (Polymarket, Kalshi, Reuters/other
+  economist polls, desk notes) and give a range rather than a single
+  invented number. DeFi Rate's Kalshi/Polymarket-blended aggregator remains a
+  stable, consistently working source for both the near-dated (Oct) and
+  December meetings — though its December sub-table has shown an internal
+  inconsistency for two straight editions now (47: 80/22; 48: 72/77), worth
+  re-checking again at edition 49.
+- **Kalshi direct fetch:** rate-limited across every edition it has been
+  attempted, now **twelve consecutive failures (37-48)** — a confirmed
+  structural gap, not transient. Resume the attempt-every-edition discipline
+  at edition 49 regardless, but expect a block of some kind. Use Kalshi's
+  own secondary reporting or DeFi Rate's blended aggregator as the
+  workaround.
+- **Official CME/ICE/Comex settlement prices:** frequently unobtainable via
+  direct fetch (JS-rendered pages). **LME's own site (lme.com) has not been
+  re-attempted as primary since edition 35. Westmetall.com, the long-standing
+  26-edition-clean fallback, went down at edition 48** (expired TLS
+  certificate, now a generic parking page) — re-attempt at edition 49 to
+  determine if this is transient; COMEX copper futures (Investing.com) were
+  used as a disclosed one-off substitute this edition.
+- **Official Treasury par yields:** home.treasury.gov's official daily
+  par-yield-curve CSV and the rendered HTML TextView page **agreed cleanly
+  again at edition 48** (2-yr 4.65%, 10-yr 4.96%, 30-yr 5.29%, all 22 Oct),
+  extending the clean streak to **thirteen editions (37-48)** with no repeat
+  of the edition-36 33bp gap. Keep fetching both endpoints and comparing
+  rather than trusting either by default. Continue scoping the TextView URL
+  to the specific month (`field_tdr_date_value_month=202610`-style
+  parameter) rather than the full year.
+- **CFTC CoT:** publishes Fridays with the prior Tuesday's data — always
+  state the lag explicitly. `financial_lf.htm` works well for equity index
+  futures (ES/NQ/RTY); note the correct legacy URL is
+  `cftc.gov/dea/futures/financial_lf.htm`, NOT `/dea/newcot/financial_lf.htm`
+  (which 404s). **Edition 48 confirmed directly that no new report has
+  posted since Friday 16 Oct's release** (covering Tue 13 Oct 2026: ES OI
+  1,931,607, Asset Mgr net approx. +47%/Leveraged Funds approx. -21%; NQ OI
+  279,515; RTY full-size OI 444,784 — unchanged, as expected since no new
+  data was due). **The next report is due Friday 23 October 2026, 3:30pm ET,
+  covering Tuesday 20 October data** — check cftc.gov directly at edition 49
+  if its window extends past that release time, likely for most plausible
+  edition-49 cutoffs; re-evaluate chart #2 (fresh CFTC vs. sector-ETF-proxy
+  default) based on what's actually available — this is especially relevant
+  given this week's tech-sector selloff and positioning angle.
+- **GBP/USD clean close:** remains fully resolved since edition 37, now
+  reconciling cleanly for a **fourth straight edition (45-48)**. **EUR/USD
+  and USD/JPY, which both showed a genuine vendor-revision shift at edition
+  47, reconciled to within a sub-pip of this report's logged bases at
+  edition 48** — see the dedicated Standing Facts entry above. EUR/USD
+  closed Thursday 22 Oct at 1.1221 (-0.11%); GBP/USD closed at 1.3401
+  (+0.05%); USD/JPY closed at 156.54 (-1.01%) — all single-sourced to
+  Investing.com's close-to-close history table.
+- **Gold/silver clean close on a non-event day:** USAGOLD remains a confirmed
+  permanent standing gap, not attempted since edition 39. **The Kitco
+  live-spot-vs-headline cross-check was resumed at edition 48 with no
+  conflict found** — see the dedicated Standing Facts entry above. Gold and
+  silver futures continue to source via Investing.com, but **edition 48
+  found both instruments' own Wednesday 21 Oct closes had again been revised
+  since this report's last-logged figures** (gold to $4,150.00 from
+  $4,142.40; silver to $57.710 from $57.590) — see the dedicated
+  vendor-revision Standing Facts entry above for the full write-up.
+  Thursday 22 Oct: gold -2.69% to $4,038.35, silver -5.37% to $54.61, both
+  off the freshly-fetched Wednesday bases.
+- **China CPI/PPI (monthly):** resolved for September — see Standing Facts
+  above, closed thread. **China Q3 GDP** is also a closed thread as of
+  edition 45 — see the dedicated Standing Facts entry above. **US
+  import/export prices and industrial production:** both closed threads for
+  September — see Standing Facts above. **University of Michigan final
+  October consumer sentiment** (see Standing Facts above): due Friday 23
+  October 2026, 10:00am ET — falls just outside edition 48's window; watch
+  for it directly at edition 49.
+- **Henry Hub natural gas:** the front-month-contract-identity question
+  remains resolved via the TradingView-expiry-calendar technique (edition
+  47). **The instrument's own price-data quality, unstable across several
+  prior editions, showed a clean, internally consistent OHLC at edition 48**
+  — continue double-checking this instrument fresh every edition regardless,
+  since it has reverted to instability before.
+- **Philadelphia Fed Nonmanufacturing Business Outlook Survey:** resolved at
+  edition 27. Closed thread — no action needed unless a future release date
+  approaches.
+- **VIX options volume from Cboe's US Options Daily Market Statistics page:**
+  substantially resolved at edition 29. **Edition 48 again found no notable
+  Thursday-dated single-stock options-flow/skew commentary** for the
+  session's megacap earnings reporters despite a targeted search — a
+  **twelfth** consecutive largely-empty edition on this general sub-item
+  (37-48). Treat this sub-item as reliably low-yield and keep it a brief,
+  secondary effort each edition.
+- **Weekend equities catalyst to watch: 13F filings** (Q1 approx. May 15, Q2
+  approx. Aug 14, Q3 approx. Nov 14, Q4 approx. Feb 14) — factor into a
+  Monday-briefing lead by default when the window includes one. Not
+  applicable through edition 48; next due approx. 14 November 2026, now
+  about three weeks out — start watching for it in editions covering early
+  November.
+- **A historical-average FOMC-day move benchmark** has not yet been sourced
+  in any edition to date (tried and failed at edition 22). Not attempted
+  again through edition 48.
+- **CFTC total open interest by instrument/date:** fully resolved at edition
+  34 for ES, NQ and RTY in one pull from cftc.gov, repeated successfully
+  again at editions 39, 44, 45, 46, 47 and 48's confirming checks (all
+  covering Tue 13 Oct data, still the most recent as of edition 48's
+  confirming check). Repeat this same three-instrument fetch at edition 49
+  when the Friday 23 Oct report should be available, watching for the
+  Micro-vs-full-size Russell naming trap each time.
+- **Named-desk confirmation of individual index-fund passive-flow figures**
+  tends to come from independent research Substacks/blogs rather than a
+  sell-side desk by name — treat as citable but note it's not a
+  bulge-bracket named source when it matters for confidence level.
+- **Dollar price targets on non-headline analyst actions are frequently
+  unobtainable even when the rating direction is clear.** Edition 48 found
+  no general analyst-action roundup for the session at all (search-index lag
+  affected this sub-item broadly this edition, not just analyst actions) —
+  the pattern across 37-48 continues to look genuinely intermittent in yield
+  and increasingly variable in sourcing depth; watch each edition
+  independently rather than assuming a trend.
+- **Single-aggregator-only movers lists need individual verification, not
+  bulk acceptance.** Edition 48 individually re-verified single-stock closes
+  directly against stockanalysis.com across the Thursday earnings slate and
+  the Wednesday-reporter follow-through; AT&T's exact Wednesday close
+  (-6.45% vs. a third-party archive's -6.1%) remains the one standing,
+  unresolved single-sourced conflict, now carried two editions. Continue
+  this direct-verification discipline on high-confidence-seeming figures,
+  not just surprising ones.
+- **The DOL's weekly initial-jobless-claims release document could not be
+  parsed at edition 47** (returned unreadable/binary data via direct fetch)
+  — not re-attempted at edition 48 (out of scope for this edition's research
+  passes); try an alternate DOL page or a secondary economic-calendar
+  aggregator for the consensus figure at edition 49.
+- **federalregister.gov's direct search interface is blocked, new at
+  edition 48:** a search attempt 302-redirected to `unblock.federalregister.gov`,
+  an apparent bot/rate-limit gate. Note this for any future tariff- or
+  trade-filing search attempt rather than re-discovering the same block.
+- **Riksbank's primary policy-rate page (riksbank.se), new gap at edition
+  48:** returned 404 on the URL previously used; the 1.75% rate is carried
+  from secondary corroboration only this edition. Re-establish a working
+  riksbank.se URL at edition 49.
+- **ECB's current policy rate, new gap at edition 48:** search results
+  showed conflicting figures (2.00% vs. 2.40%) across sources of different
+  vintages; not resolved this edition. Needs a direct ecb.europa.eu fetch if
+  the ECB is to be added to the policy-rate table going forward.
+
+## Production notes (technical)
+- Charts: matplotlib → PNG, referenced from HTML. **Figsize should scale to
+  the chart's category count, not use one fixed size for everything.** Use
+  `(9.8, 1.95)` as the ceiling for an 11-category sector-ETF-proxy panel
+  (confirmed clean at editions 37 through 43 and again at 45 through 48,
+  eleven editions total) — this remains correct for 10-11 categories
+  specifically. For charts with fewer categories, scale the height down:
+  roughly `(9.8, 1.65-1.95)` for 3-9 categories (editions 47 and 48 both used
+  `(9.8, 1.95)` for a 9-category single-stock movers chart). **Always render
+  and visually inspect (via the Read tool) the actual PNG at or near full
+  resolution before embedding it**, regardless of what a past edition's
+  success might suggest. **Default to pad_frac=0.30 from the start for an
+  11-category sector-ETF panel** — now a confirmed, repeated pattern across
+  four straight small-magnitude 11-category panels (45-48).
+- **Capped-outlier label-overlap fix (from edition 45):** when a capped
+  bar's value label uses a "(capped)" text suffix, the label text can be
+  long enough to visually bleed into the y-axis tick-label margin even at a
+  wide pad_frac, because matplotlib's `ax.text()` is unclipped by default.
+  **Fix: shorten the per-bar suffix to a single trailing asterisk (`"*"`
+  instead of `" (capped)"`) and add one footnote to the chart's x-axis label
+  instead.** This remains the recommended default for any future
+  capped-outlier chart. **Editions 47 and 48 both fell well under the
+  approx. 5x capping threshold despite one edition's largest mover having an
+  unusually big raw magnitude, so no capping was needed either time** —
+  reinforcing that the trigger is the ratio to the next-largest bar, not the
+  largest bar's absolute size.
+- **A grouped (two-series) horizontal bar chart — needed for the CFTC
+  Asset-Manager-vs-Leveraged-Funds positioning chart — requires custom chart
+  code, not the standard single-series `barh()` helper used for the
+  movers/sector charts** (first built at edition 44). The standard helper
+  only plots one value per category; the CFTC chart needs two bars (Asset
+  Manager, Leveraged Funds) per category (ES/NQ/RTY), offset vertically by a
+  fixed height fraction (`h=0.32` worked cleanly for 3 categories) around
+  each category's tick position. **Fix that worked for the legend:** use a
+  FIGURE-level legend (`fig.legend(handles, labels, loc="lower center",
+  bbox_to_anchor=(0.5, 0.0), ...)`) combined with
+  `fig.tight_layout(rect=(0, 0.1, 1, 1))` to reserve the bottom 10% of the
+  figure for the legend, clear of the x-axis label — an axis-level legend
+  placed too far below the axes will overlap the x-axis label text.
+  Figsize `(9.8, 2.15)` (taller than the movers chart's 1.8-1.95 range)
+  rendered cleanly. **Reuse this exact pattern** for any future
+  grouped/multi-series chart rather than re-deriving the legend-placement
+  fix from scratch. **This chart has not been used since edition 44 — the
+  next time fresh CFTC data is available (expected edition 49), re-evaluate
+  whether this is again the right chart #2, especially given the tech-
+  selloff positioning angle this week.**
+- PDF: HTML → Chromium print-to-PDF via Playwright. Launch Chromium with an
+  explicit `executablePath` (check the environment for the installed
+  Chromium build path) and `--no-sandbox`. Do not run `playwright install`.
+- Set margins in **exactly one place** — either the CSS `@page` block or the
+  Playwright `page.pdf()` margin option, never both (they stack and double
+  the margin). Passing `{top:'1in', bottom:'1in', left:'13mm', right:'13mm'}`
+  via `page.pdf()` with the HTML body at `margin:0; padding:0` and no CSS
+  `@page` block is the pattern that has worked reliably.
+- **Only ONE forced `page-break-before` in the whole document: immediately
+  before Annex A.** Let sections 1–6 flow naturally — a stray extra break
+  produces a 5-page PDF with a mostly-blank orphan page. `grep -n
+  'pagebreak'` before troubleshooting anything else if page count looks
+  wrong. Always check for content duplication across sections first when a
+  draft overflows — it has twice been the cheapest, highest-leverage fix.
+- `<thead>` on the two-column tables pushes the layout to 5 pages — leave
+  header rows as plain `<tr>`. Plain-`<tr>` tables reflow across a page
+  break safely — this is expected behavior, not a bug to fix.
+- **A markup-correctness trap, logged at edition 47: a `<sup class="ref">`
+  citation tag placed immediately after a table row's last `</td>` but still
+  inside the `<tr>` (i.e. not nested inside any `<td>`) is invalid table
+  structure.** `check_refs.py` will NOT catch this. **Always nest every
+  `<sup class="ref">` tag inside a `<td>...</td>` pair, never as a sibling of
+  one inside a `<tr>`** — grep for `</td><sup` as a quick self-check if a
+  table was built with a lot of copy-paste. Edition 48's draft was checked
+  this way and came back clean.
+- Always verify the render: `pdftoppm -png -r 100` (or similar) and actually
+  read the page images before delivering — don't trust the page count alone.
+  **Edition 48 rendered clean at 4 pages on the first attempt, no trims
+  needed.**
+
+### Working settings (current baseline — retightened at edition 39 under
+genuine evidence of overflow; confirmed stable across editions 40 through
+48's very different content volumes. Treat as the durable default; the
+lever to pull on a high-volume or overflowing day is first checking for
+duplicated content across sections, then merging/trimming redundant content
+across whichever sections are longest — not loosening the CSS further.)
+- Letter size. Body **8.0pt** / line-height **1.20**, serif; `p`
+  margin-bottom **1.6px** (tightened from 2.4px at edition 39).
+- h1 14.5pt; h2 **9.1pt, margin 3px 0 1.2px 0, padding-bottom 0.6px**
+  (tightened from `4px 0 1.6px 0` / `1px`); h3 **7.9pt, margin 1.8px 0 0.8px
+  0** (tightened from `2.4px 0 1px 0`).
+- Tables **7.4pt**, **1.0px cell padding** (tightened from 1.8px), table
+  margin-bottom **2px** (tightened from 3px).
+- Snap-grid tiles: 7.4pt label / 9.4pt value / 7.3pt change; tile padding
+  **2px 4px**, snapgrid margin-bottom **3.5px** (unchanged — tiles were not a
+  contributor to edition 39's overflow).
+- Bullet lists (`ul.bullets`): **1.0px** margin-bottom per `li` (tightened
+  from 1.4px).
+- Annex A: two columns at 7.1pt, `break-inside:avoid` per `li` (left-aligned
+  — reads cleanly at this width; justify only if it still looks clean after
+  testing).
+- Annex B: three columns at 5.5pt, left-aligned.
+- Content budget: 60-second read (5 items); equities as the largest block
+  plus the movers table; macro/commodities/derivatives tighter; **a "This
+  week's known catalysts" table plus a "Sector setup we take into [session]"
+  bullet list at the end of Section 6 by default** for any single-session or
+  weekend-window edition (skip only if a multi-session catch-up already
+  fills 3 pages). **An optional "Commodities & FX levels" table (~9-13
+  rows)** at the end of Section 4 is available as padding if page 3 runs
+  short after the two default blocks — reach for it only when content alone
+  doesn't fill the page; editions 44 through 48 all folded commodities, FX
+  and Treasuries into ONE combined table (10-14 rows) as the PRIMARY
+  commodities table rather than padding, now the standing default rather
+  than an edition-specific choice. **On a high-single-stock-volume earnings
+  day, watch the movers table specifically for verbosity** (multi-clause
+  driver text, rows that could share a combined cell) before assuming the
+  page budget is safe. **Edition 48, despite a genuinely heavy earnings day
+  (Lockheed Martin, Procter & Gamble, plus a long Thursday earnings slate
+  and megacap follow-through), converged to a clean 4-page render on the
+  first attempt with no trims or padding needed** — a tight 9-row movers
+  table plus grouped prose paragraphs kept the section readable. Always
+  re-render immediately after adding (or removing) any content to confirm
+  the page count. **When overflow appears, check for duplicated content
+  across sections FIRST before diffuse trimming; if no duplication is found,
+  trim a little from several sections rather than gutting one.**
+
+**Chart #2 selection guidance:** pick by what the day's dominant story
+actually is. Macro/rotation with no fresher signal → SPDR sector-ETF proxy
+(same-day closes, the standing default — used across twenty-three eligible
+editions, 25 through 48, with editions 34, 39 and 44 the exceptions when
+fresher CFTC data was available; editions 45 through 48 all reverted to this
+default since the CFTC's next report was not yet due inside any of those
+windows). Fresh CFTC CoT data on a Monday/weekend-window edition → the
+ES/NQ/RTY asset-manager-vs-leveraged-funds positioning chart, normalized as
+% of open interest, built with the grouped-bar technique documented under
+Production notes, placed in Section 5 (Derivatives) per the editions
+24/34/39/44 precedent. A single dominant earnings print with a clean,
+well-sourced implied-vs-realized-move story → a three-bar implied/
+historical-average/realized move chart (the historical-average leg has
+never actually been sourced successfully). A genuine multi-sector
+broadening/deepening selloff across consecutive sessions → the sector-ETF
+proxy rendered as a grouped (day-over-day) bar instead of single-day. A
+holiday-window preview edition with no fresher data → VIX futures term
+structure with event annotations. When chart 1 (movers) already covers the
+earnings/single-name story, the sector proxy (or a fresh CFTC positioning
+chart, when available) is a good complementary choice even on a stock-heavy
+day, since the two stories reinforce rather than duplicate each other —
+editions 46 through 48 all used exactly this combination on high-earnings-
+volume sessions. **Edition 49 should check cftc.gov's freshness first** (the
+Friday 23 Oct report, covering Tuesday 20 Oct) before defaulting back to the
+sector-ETF proxy — if CFTC data has posted fresh by edition 49's cutoff
+(likely for most plausible cutoffs given the 3:30pm ET release time), use
+the fresh CFTC chart per the established technique, which would also be
+particularly well-timed given this week's tech-sector selloff and
+positioning angle; otherwise revert to the sector-ETF-proxy default as
+usual. **Remember the figsize-scales-to-category-count guidance above
+(ceiling `(9.8, 1.95)` for an 11-category panel, `(9.8, 2.15)` for the
+3-category grouped CFTC chart, scale down for fewer single-series
+categories), that an 11-category sector-ETF panel should default to
+pad_frac=0.30 from the start (four straight confirming editions, 45-48), and
+the capped-outlier asterisk/footnote fix when a spread crosses the approx.
+5x RATIO threshold** (it did not at either edition 47 or 48).
+
+## Edition log
+Compact history for continuity — enough for the next edition to know the
+last cutoff, avoid repeating items, and see any standing open threads. Older
+editions are condensed; keep the most recent edition in full detail, the
+prior one condensed to a medium paragraph, and fold editions further back
+into the running mega-block once they've had their turn as the condensed
+paragraph.
+
+**Editions 1–46 (condensed):** established the format (edition 1 baseline;
+edition 2 revised weighting/sourcing; edition 3 fixed the ET-cutoff math);
+corrected the Fed Chair premise to Kevin Warsh at edition 6 (re-verified
+every edition since); tracked the Jackson Hole keynote (28 Aug, hawkish) and
+the resulting rate-odds repricing through editions 10–18; resolved the
+SPDR-sector-ETF-proxy and CBOE-feed sourcing techniques at editions 10–11;
+corrected the FOMC decision date to Wednesday 16 Sept at edition 18. Major
+single-name events across editions 1-21: Moderna's melanoma-data
+spike/unwind, Nvidia's Q2 FY27 beat/Hugging Face acquisition,
+Walmart/Advance Auto Parts/Deere earnings, the PayPal-Stripe deal collapse,
+California SB 492 hitting utilities, an Iran/Hormuz escalation cycle
+repeatedly driving oil, Lululemon's guidance-slash collapse, Canada's approx.
+$27.6bn retaliatory tariffs, Apple's first Ternus-era product event,
+Oracle's Q1 FY27 vol-crush beat, the Fed debate flipping from "hold vs. cut"
+to "hold vs. hike" on hot core CPI, and Anthropic CEO Dario Amodei's
+AI-safety essay driving a chip-selloff/cybersecurity rotation. **The Sept
+15-16 FOMC meeting and its aftermath (editions 21-23):** the Fed hiked 25bp
+to 3.75%-4.00% unanimous 12-0, equities reversed hard then rallied sharply;
+BoE held at 3.75% (6-3). Edition 24: approx. $7tn September triple-witching
+notional expired, Xenon Pharmaceuticals -30.7%, Buffett stepped down as
+Berkshire chairman, BoJ hiked to approx. 1.25% (31-year high). Edition 25:
+chip rally to a then-record Nasdaq. Edition 26: financials-led rotation, a
+genuine Kitco-vs-USAGOLD gold split (later resolved). Edition 27: risk-off on
+a 19-year 10-year yield high. Edition 28: a whipsaw near-flat session, MGM
+-10.99% on a withdrawn take-private bid, Trump-Xi summit extended the
+US-China trade truce. Edition 29: relief rally, the US-China $30bn
+tariff-cut agreement first reported. Edition 30: broad risk-off on a
+rejected Iran Hormuz offer, Kodiak Sciences +177.96% (the movers-chart
+capping rule's first genuine case). Edition 31: DXY-vs-FX-crosses conflict
+resolved cleanly. Edition 32: a volatile round-trip close, gold spot/futures
+split (later converged). Edition 33: yields drove the session on a hot ISM
+Prices Paid print, an AI-infra earnings cluster, Nike missed FQ1 guidance
+(resolved edition 34); the document overflowed to 5 pages, needing five trim
+rounds. Edition 34 (Mon 5 Oct, covering Fri 2 Oct + weekend): a badly-missed
+September jobs report drove a broad risk-on rally and sharp October-hike-odds
+collapse; a fresh CFTC CoT report powered the first ES/NQ/RTY positioning
+chart. Edition 35 (Tue 6 Oct): two same-day cash buyouts (PTC Inc, RXO Inc)
+drove the tape; equities hit a Nasdaq Composite record; September ISM
+Services PMI printed hot; two new sourcing traps logged (stale price-target
+recirculation, a stock-split "+96%" artifact). Edition 36 (Wed 7 Oct):
+equities extended records on falling yields; two severe sourcing traps hit
+(fabricated AMD price targets, an unverifiable WHO claim, both rejected);
+the Paramount Skydance/Warner Bros. Discovery merger closed (ticker SKYD); a
+secondary source reversed the US-China tariff list-size assignment (resolved
+edition 37); the 2-year Treasury hit a 33bp cross-endpoint gap (resolved
+edition 37); GBP/USD hit a three-way conflict (resolved edition 37). Edition
+37 (Thu 8 Oct): the FOMC minutes showed a unanimous 12-0 September hike but
+only "most" backing a further 2026 move; equities retreated on a bond-market
+selloff; three standing conflicts all resolved this edition; WTI and Brent
+both hit a sharp level-vs-%-change reconciliation failure; a chart-layout
+bug was found and fixed. Edition 38 (Fri 9 Oct): equities fell a second
+straight session but breadth stayed strong; a second straight AI-optics
+profit-taking session; Applied Digital's blowout print drew a muted reaction
+and logged the first non-GAAP-vs-GAAP EPS conflict trap; a primary-source
+breakthrough closed BoJ's last standing gap; oil's vendor-%-reconciliation
+failure became well-established; zerogex logged three within-session
+anomalies as a new data-quality trap. Edition 39 (Mon 12 Oct, covering Fri 9
+Oct + weekend): SpaceX's approx. $8bn spectrum purchase rattled telecom but
+equities shrugged it off, closing a record-setting week; a parallel biotech
+rally ran alongside it; Delta's 8-K cleanly disclosed both GAAP and adjusted
+EPS; Goldman upgraded Palantir; a chart-sizing refinement and deliberate CSS
+retightening were needed to fix a genuine 5-page overflow. Edition 40 (Tue
+13 Oct, covering Mon 12 Oct, Columbus Day): a value/growth split on renewed
+memory-chip/AI-hardware weakness; AP's wire needed search-snippet recovery;
+oil delivered its cleanest-ever dual-grade reconciliation (later found to
+rest on a retroactively revised Monday base); zerogex's SPX gamma hit a
+harder auth-gated/blank failure mode; a chart-label pad_frac bug was found
+and fixed; a short-page-3 recurrence was fixed with a new Treasury-yield-
+curve table. Edition 41 (Wed 14 Oct, covering Tue 13 Oct, the opening day of
+Q3 bank/healthcare earnings season): JPMorgan, Goldman, Wells Fargo,
+Citigroup, UnitedHealth and Johnson & Johnson all reported; JNJ's GAAP EPS
+collapsed to $0.09 on a one-time talc-settlement charge while adjusted EPS
+and raised guidance were both disclosed cleanly; equities finished
+essentially flat via a clean AP wire recovered through two syndication
+mirrors; Bumble's unexplained +56.58% surfaced (resolved edition 42: a
+$1.3bn Ithaca Holdings buyout); the AI-optics/AI-hardware selloff cluster
+finally found its delayed driver (Broadcom CEO Hock Tan's remarks); a new
+vendor-retroactive-revision trap hit WTI, Brent and Henry Hub for the first
+time. Edition 42 (Thu 15 Oct, covering Wed 14 Oct): September CPI printed
+hot, triggering the broadest risk-off session in weeks (S&P -1.11%, Nasdaq
+-1.88%); CoreWeave and Oracle led decliners on renewed AI-infrastructure-
+funding-stress; Bumble's buyout mystery resolved; rate-path odds repriced
+sharply hawkish; the Treasury curve flattened; the vendor-retroactive-
+revision trap broadened to FX for the first time; the VIX complex spiked
+hard. Edition 43 (Fri 16 Oct, covering Thu 15 Oct): a second straight
+blowout inflation print (September PPI) barely moved Fed odds; an overnight
+memory-chip rout reversed sharply on Nvidia CEO Jensen Huang's defense of
+CoreWeave's balance sheet; TSMC's record Q3 still fell on cautious guidance;
+Ericsson's beat drove the session's largest single-stock move (+11.80%); six
+of eleven commodities/FX instruments showed a silently-shifted Wednesday
+base. Edition 44 (Mon 19 Oct, covering Fri 16 Oct + weekend): equities fell
+broadly Friday on renewed AI-infra. spending doubts (Nasdaq -2.14%, its
+worst week since June); the VIX complex spiked hard with both CBOE feed bugs
+appearing simultaneously for the first time; five large movers had no
+confirmed catalyst; a FreightWaves "+12%" J.B. Hunt headline was flatly
+wrong (actual close -2.78%); CFTC CoT posted fresh data, powering the first
+grouped-bar positioning chart; the first HTML draft overflowed to 5 pages,
+fixed over roughly five trim rounds. Edition 45 (Tue 20 Oct, covering Mon 19
+Oct + weekend): equities rebounded broadly though breadth stayed narrow;
+neither AP nor Reuters had posted a wire by cutoff, a new CNBC-live-blog/
+Investrade/SPY-proxy fallback tier was used; biotech produced the day's
+extremes (Silence Therapeutics +125.58% on a Merck KGaA buyout, EyePoint
+Pharmaceuticals -85.28% on a failed trial), the chart's first
+outlier-capping use, surfacing a label-overlap bug (fixed via an
+asterisk+footnote pattern); two claims were excluded after failing
+corroboration; GE Vernova's decline closed with a caveat; China's Q3 GDP
+release-date dispute resolved; the vendor-revision trap's locus rotated to
+WTI while EUR/USD and GBP/USD reconciled cleanly; Henry Hub also broke its
+own five-edition base-ambiguity streak; the VIX complex unwound sharply off
+Friday's spike. 33 sources, clean 33/33 on `check_refs.py` after one quick
+fix, clean 4-page render. **Edition 46** (Wed 21 Oct, covering Tue 20 Oct):
+equities rallied broadly in a sharp rotation reversal (S&P +0.29%, Dow
++1.02%, Nasdaq roughly flat, Russell +1.65%), 10 of 11 sectors green;
+neither AP nor Reuters had posted a wire by cutoff for a second straight
+edition; a new trap was logged when a secondary outlet's sector narrative
+was flatly contradicted by a direct 11-ETF fetch. A packed earnings Tuesday:
+Salesforce's $47.50/share Braze buyout (BRZE +51.70%), Equifax (+11.33%, a
+new unexplained-magnitude thread) and Hasbro (+11.20%) led gainers; GM fell
+6.84% despite a beat and a $20bn buyback; Netflix fell in the regular
+session then further after hours on soft Q4 guidance. Standing Fed facts
+all re-verified unchanged; rate-path odds little changed; Kalshi and CME
+FedWatch both failed again; New Mexico v. Meta logged a new 9 Oct
+stay-of-enforcement detail (later superseded by the actual ruling at edition
+47). The vendor-revision trap hit its broadest case yet (gold, silver and
+Henry Hub); WTI, Brent, copper, GBP/USD and the Treasury curve reconciled
+cleanly. The VIX complex extended its unwind; dealer gamma fully unusable;
+CFTC CoT confirmed no new data as expected. The first HTML draft rendered
+clean at 4 pages with no trims needed. 42 sources, clean 42/42 on the first
+`check_refs.py` pass, zero stray tildes.
+
+**Edition 47 (condensed)** — Thursday 22 October 2026 report covering
+Wednesday 21 October 2026. Equities extended Tuesday's rally for a second
+straight session (S&P +0.58% to 7,757.17, Dow +0.68% to 52,856.09, Nasdaq
++1.05% to 26,702.86, Russell +0.27% to 2,781.02), led by Technology
+(+1.67%) even as Communication Services (-1.11%) lagged ahead of Meta's
+evening report; 7 of 11 SPDR sectors green. AP's wire posted this time but
+apnews.com itself blocked direct fetch (403), requiring a syndication-mirror
+workaround. A genuinely enormous Q3 earnings day: Netflix (-5.31%), AT&T
+(-6.45%, single-sourced with a conflicting third-party -6.1% figure), United
+Airlines (+3.99%), Capital One, CME Group, Abbott, Danaher (+4.29%), Thermo
+Fisher and Elevance Health all reported around Tuesday's close/Wednesday's
+open; after Wednesday's close, Meta, Tesla, IBM and Texas Instruments
+reported with four distinct after-hours reaction patterns, Meta's own
+after-hours move showing a genuine same-aggregator internal conflict
+(+2.16% vs. +4%, later resolved operationally by edition 48's Thursday
+close). The single-stock-movers chart was dominated by non-megacap names
+found via SEC EDGAR full-text search for same-date 8-Ks: Arcus Biosciences
+-19.58%, Integra LifeSciences -11.18%, Lithia Motors -10.15% and M/I Homes
+-8.08%, none needing outlier-capping. New Mexico's Judge Francis Mathew
+ruled Meta owes $25bn in civil penalties, closing the "still pending" status
+carried since edition 37 (a narrower stay/appeal sub-question remained
+open). The US-China tariff-implementation sub-question was substantively
+answered via USTR Ambassador Greer's full 27 Sept statement: recommendations
+only, no effective date, no set timeline. Standing Fed facts reconfirmed
+unchanged (Kevin Warsh, 18th straight; FOMC Oct 27-28 inside its confirmed
+Oct 17-29 blackout). Rate-path odds: Oct 28 hold approx. 88%; December 9
+odds pulled fresh (hike approx. 77% blended, Kalshi's own December sub-table
+showing an internal 80/22 inconsistency). Kalshi (11th straight failure) and
+CME FedWatch (7th straight failure) both failed direct fetch again. The
+whitehouse.gov shutdown-status URL broke its four-edition streak; the
+underlying fact was re-confirmed via an alternate document (later replaced
+by a clean, standing URL at edition 48). The vendor-revision trap rotated to
+gold/silver/DXY/EUR-USD/USD-JPY (five instruments); GBP/USD, copper and the
+Treasury curve reconciled cleanly. Henry Hub's front-month ambiguity was
+cleanly resolved via TradingView's contract-expiry calendar though the
+session's own OHLC looked internally inconsistent. The VIX complex extended
+its unwind for a third straight session (-3.64% to 16.68), with a bonus
+clean SKEW read. CFTC CoT confirmed no new data as expected. The first HTML
+draft overflowed to 5 pages from a single duplicated content block (a "day
+ahead" paragraph in Section 3 repeating Section 6's table) — clean at 4
+pages after removing the duplication plus a few smaller trims. 34 sources,
+clean 34/34 on `check_refs.py` after fixing one markup bug, zero stray
+tildes.
+
+**Edition 48 (most recent — full detail)** — Friday 23 October 2026 report
+covering Thursday 22 October 2026, research window Wed 21 Oct 2026 20:00 ET
+through Thu 22 Oct 2026 20:20 ET (the window's one NYSE session). Verified
+the two structural header rules again — now clean across sixteen (date-line)
+and twenty (window-line) consecutive applicable editions respectively.
+
+**A tech-led rotation, not a broad selloff:** S&P 500 -1.21% to 7,663.43,
+Nasdaq Composite approx. -2.58% to 26,014.86 (ETF-proxy derived), Nasdaq-100
+-2.86%, while the Dow held +0.02% to 52,867.98 and the Russell 2000 +0.07%
+to 2,782.97 — Technology (-3.29%) led sector laggards on Meta's
+post-earnings reversal and chip-complex weakness (Nvidia -4.40%, Alphabet
+-3.15%, Texas Instruments -1.81%), cushioned by Consumer Staples (+3.31%)
+and Utilities (+2.07%) on defensive rotation plus a strong industrials/
+staples earnings cluster (Lockheed Martin +6.96%, Procter & Gamble +5.58% to
++6.28%). 6 of 11 SPDR sectors closed higher. **Neither AP nor Reuters had an
+indexed, fetchable wire for Thursday by cutoff** — a new fallback
+combination (stockanalysis.com ETF-proxy data cross-checked against a
+direct-index snapshot from fool.com) was used and reconciled tightly against
+Wednesday's logged closes; Nasdaq Composite and Russell levels remain
+ETF-proxy-derived rather than direct snapshots. **Meta's Wednesday
+after-hours quote dispute (edition 47's +2.16% vs. +4%) was rendered
+operationally moot by Thursday's unambiguous regular-session close (-6.98%
+to $648.85)** — the underlying 8-K showed a $64.60bn revenue beat
+overshadowed by a $9.89bn one-time teen-safety-settlement charge (GAAP EPS
+$3.83 vs. adjusted $7.40) and a capex guide raised to $135-145bn with no
+2027 guidance, read by the market as an AI-capex-anxiety trigger. IBM, which
+fell -4.63% after hours Wednesday, ended Thursday roughly flat (+0.26%),
+while Tesla (-3.08%) and Texas Instruments (-1.81%) both extended their
+Wednesday after-hours direction — a new standing lesson that after-hours
+reactions resolve independently by name into the next session, not as a
+uniform block. Equifax extended its unexplained rally for a third straight
+session (+6.59% Thursday, now approx. +18% cumulative on an in-line print)
+— still no catalyst found. New Mexico v. Meta's stay-of-enforcement/notice-
+of-appeal sub-question remains unconfirmed, carried two editions now.
+**Standing Fed facts reconfirmed with no contradiction** (Kevin Warsh; FOMC
+Oct 27-28 blackout confirmed clean, no Fed-speaker calendar entries Oct
+21-22). **Rate-path odds moved meaningfully more dovish**: Oct 28 hold
+approx. 94% (up from approx. 88%), December hike odds eased to approx.
+72-77% (internal inconsistency persists). Kalshi (12th straight failure)
+and CME FedWatch (8th straight failure) both failed direct fetch again.
+**Bank of Japan's Oct 29-30 meeting date was confirmed via an explicit
+dedicated direct fetch**, closing a 3-edition-open thread; the exact
+numeric policy rate remains unconfirmed via readable primary HTML for a 4th
+straight edition. **A clean, working whitehouse.gov URL for
+government-funding status was re-established**, replacing the one that
+broke at edition 47 (H.R. 6500 funds agencies through 11 Dec 2026, no
+shutdown). Riksbank's primary URL 404'd and the ECB's current rate showed
+conflicting figures (2.00% vs. 2.40%) — both newly logged sourcing gaps; ECB
+excluded from this edition's policy-rate table. **LME copper's primary
+source (westmetall.com) went down** (expired TLS certificate, now a generic
+parking page) — the first break in a 26-edition clean streak; COMEX futures
+used as a disclosed substitute. The vendor-revision trap narrowed back to
+gold/silver only this edition (both revised again on refetch, +0.18pp and
++0.21pp respectively), while EUR/USD and USD/JPY reconciled to within a
+sub-pip of their edition-47-logged bases and GBP/USD reconciled cleanly for
+a 4th straight edition. Henry Hub's OHLC was internally consistent for the
+first time in several editions. The CBOE VIX feed returned a full clean
+sweep with neither known bug present; VIX jumped +14.09% to 19.03 (a genuine
+event-driven pop) while the term structure held in contango. CFTC confirmed
+no new data as expected (next due Fri 23 Oct, outside this window). The
+first HTML draft rendered clean at 4 pages with no trims needed. 24 sources,
+clean 24/24 on `check_refs.py` on the first pass, zero stray tildes.
+
+**Open threads for edition 49:** The Fed Chair's exact term-end date was
+flagged for recording at edition 48 but not completed (fell outside this
+edition's research-pass scope) — still needs a direct federalreserve.gov
+fetch. Whether the 9 October stay of enforcement in New Mexico v. Meta
+applies to the $25bn judgment, and whether Meta has filed its formal notice
+of appeal, remain unconfirmed, now carried two editions. AT&T's exact
+Wednesday 21 Oct close (-6.45% vs. -6.1%) remains unresolved, also carried
+two editions. Equifax's unexplained rally is now three sessions deep
+(approx. +18% cumulative) — worth a dedicated search attempt if bandwidth
+allows. BoJ's exact numeric policy rate via readable primary HTML remains
+unconfirmed for four straight editions (45-48) — try a different page type
+(an English-language FAQ or data-statistics page) since the statement-PDF
+approach has now failed four times running; also re-confirm the Oct 29-30
+meeting date stays current as it approaches. Re-establish Riksbank's primary
+URL (riksbank.se), 404'd at edition 48. Resolve the ECB's current policy
+rate (conflicting 2.00% vs. 2.40%) via a direct ecb.europa.eu fetch if the
+ECB is to join the policy-rate table. Re-attempt LME copper (westmetall.com)
+to determine whether the edition-48 outage was transient or permanent; if
+still down, consider formally adopting COMEX as the standing fallback.
+University of Michigan's final October consumer sentiment (Fri 23 Oct,
+10:00am ET) falls just after edition 48's window closed — edition 49 should
+capture it directly if its window reaches that release. Bank of Canada's
+Wed 28 Oct decision was only secondary-sourced at edition 48 — worth a
+direct primary fetch given it lands the same day as the FOMC decision. The
+CFTC CoT report due Fri 23 Oct 3:30pm ET (covering Tue 20 Oct data) should
+land inside edition 49's window if its cutoff extends past 3:30pm ET that
+day — re-evaluate chart #2 selection accordingly, especially given this
+week's tech-selloff positioning angle. **The FOMC decision itself (Oct
+27-28) is now the dominant upcoming catalyst — whichever edition's covered
+session falls on or after Oct 27-28 should lead with it.**
+federalregister.gov's direct search interface returned a bot-protection
+redirect at edition 48 — note for any future tariff-filing search. CBRE,
+Roper Technologies, Nasdaq Inc., Dow Inc., PulteGroup, Freeport-McMoRan,
+Blackstone and Valero Energy's Thursday 22 Oct price moves were not
+individually verified — low priority, pick up only if bandwidth allows.
+Options implied-vs-realized move data and single-stock options flow/skew
+remain low-yield across many editions (12 straight on the options-flow
+sub-item) — keep as a brief, secondary effort only. The
+"preview-consensus-only miss/beat framing" caution remains open,
+unconfirmed, not re-chased since edition 41. 13F filings are due approx. 14
+November 2026, now about three weeks out — start watching for it in
+editions covering early November. Threads closed after resolution rather
+than carried further: Meta's Wednesday after-hours quote dispute
+(operationally resolved by Thursday's unambiguous close, edition 48); Bank
+of Japan's Oct 29-30 meeting date (confirmed via dedicated direct fetch,
+edition 48); the government-shutdown-status URL (re-established, edition
+48); Henry Hub's OHLC internal-consistency concern (clean this edition,
+though continue monitoring); MillerKnoll's and Opendoor's Wednesday
+declines (both fully reversed Thursday with no new catalyst, treated as
+closed rather than actively chased further).
