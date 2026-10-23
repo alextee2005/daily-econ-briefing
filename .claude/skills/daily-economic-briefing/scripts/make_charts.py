@@ -25,7 +25,7 @@ PANEL2 = [("Energy (XLE)", 2.17), ("Materials (XLB)", 0.48),
           ("Industrials (XLI)", -0.64), ("Cons. Staples (XLP)", -0.82),
           ("Comm. Svcs (XLC)", -0.90), ("Utilities (XLU)", -1.20),
           ("Cons. Discretionary (XLY)", -1.75)]
-PANEL2_TITLE = "Sector rotation — Tuesday 15 Sept 2026"
+PANEL2_TITLE = "Sector performance — Tuesday 15 Sept 2026"
 PANEL2_XLABEL = "% change, SPDR sector ETF proxy [2]"
 # ----------------------------------------------------------------------------
 

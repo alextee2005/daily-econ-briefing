@@ -16,7 +16,7 @@ Each weekday the workflow fires, decides whether there is anything to cover,
 installs the toolchain, and invokes the `/daily-economic-briefing` skill
 (vendored at `.claude/skills/daily-economic-briefing/`) with this spec as its
 instructions. The run is **non-interactive** — there is nobody to ask. If a
-figure cannot be verified, it goes in Annex A.
+figure cannot be verified, it goes in Annex B.
 
 What the workflow hands each run, and what each run must produce:
 
@@ -405,7 +405,7 @@ would invalidate it — a tier with no audit trail is just an assumption.
   standing caution.** AT&T's exact Wednesday 21 Oct close (-6.45% per
   stockanalysis.com vs. a third-party archive's -6.1%) remains unresolved at
   edition 48 as well — now carried two editions as an open, single-source
-  conflict (Annex A each time until resolved).
+  conflict (Annex B each time until resolved).
 - **A reinforcing, non-novel reminder, reinforced hard again at edition 48:
   premarket/regular-session-close is not the after-hours earnings reaction,
   and the two can diverge sharply — and, new this edition, an after-hours
@@ -453,7 +453,7 @@ would invalidate it — a tier with no audit trail is just an assumption.
 - **A non-GAAP-vs-GAAP EPS conflict trap was logged for the first time at
   edition 38** — when a secondary-sourced EPS figure conflicts sharply with
   a primary filing's GAAP number without a stated basis, prefer the primary
-  filing and flag the secondary figure in Annex A. **Edition 48 logged
+  filing and flag the secondary figure in Annex B. **Edition 48 logged
   another clean confirmation via Meta's own Q3 2026 8-K**: GAAP diluted EPS
   $3.83 vs. adjusted (ex. a $9.89bn one-time legal-settlement charge) $7.40,
   both disclosed clearly in the filing — reported in full per the established
@@ -495,12 +495,27 @@ sector-agnostic. Plain English. Single-stock focus (see coverage below).
 ## Coverage and weighting
 Single stocks are the centre of gravity. Weight roughly: **~45% single
 stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
-1. **US equities & earnings (LEAD, largest section)** — index closes, sector
-   rotation, single-stock movers, earnings since last cutoff, guidance
-   changes, analyst actions. **Bias name selection toward:** Technology,
-   SaaS/software, consumer staples, consumer discretionary, telcos, and
-   large industrials. This is the section the user reads first — give it the
-   most column space and the most "why it moved / read-across" depth.
+
+**These percentages describe the shape of the briefing, not a cap on its
+length.** Market recap's sector coverage, added at edition 49, is **on top of
+them** rather than carved out of equities: the sector material moved out of
+section 2, but section 2's share did not move with it. Give the freed space
+back to single stocks as more names and more read-across depth. If the result
+runs long, that is what the page-4 spillover rule is for — do not cut
+single-stock coverage to make room for the sector section.
+
+0. **Market recap** — index closes in the snap-grid tiles, the recap
+   paragraph, and **all sector and ETF coverage**: the sector-ETF chart and
+   the narration of how each sector performed in the session. Sized by what
+   the sector story actually warrants, not by a percentage.
+1. **US equities & earnings (LEAD, largest section) — single stocks only** —
+   single-stock movers, earnings since last cutoff, guidance changes,
+   analyst actions. **No sector rotation or ETF commentary here; that is
+   section 1's from edition 49.** **Bias name selection toward:**
+   Technology, SaaS/software, consumer staples, consumer discretionary,
+   telcos, and large industrials. This is the section the user reads first —
+   give it the most column space and the most "why it moved / read-across"
+   depth.
 2. **Macro & policy (condensed)** — keep only macro that plausibly moves
    single stocks or sectors: inflation prints, jobs, the Fed rate path,
    major central-bank and trade/tariff decisions, and the day-ahead calendar
@@ -515,19 +530,26 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
    interested).
 
 ## Confirmed format (locked)
-- **Length:** 3 pages of briefing + 1-page annex. Do not exceed.
+- **Length: 4 pages total, hard. Do not exceed.** The split inside those
+  four changed at edition 49: sections 1-6 are no longer confined to the
+  first three. If they run past page 3 they may spill onto page 4 and the
+  annex follows immediately below the spillover, sharing that page rather
+  than being pushed to a fifth. See the page-break bullet under Production
+  notes for exactly when the forced break stays and when it goes. Trimming
+  is still the answer once four pages genuinely will not hold it, just no
+  longer the first answer.
 - **No "So what" lines.** Interpretation lives in the 60-second read at the
   top, and inline only where a number is meaningless without it — never as a
   standalone labelled line.
 - **Sources:** numbered inline references `[n]` in a small blue superscript
-  span, full list in Annex B. Never inline URLs in the body. **Each citation
+  span, full list in Annex C. Never inline URLs in the body. **Each citation
   number gets its own `<sup class="ref">[n]</sup>` tag** — do not write
   `[26][27]` inside one sup tag; write `<sup class="ref">[26]</sup><sup
   class="ref">[27]</sup>`. `check_refs.py`'s regex only matches one bracket
   per sup tag, so combined-bracket citations silently fail the cross-check.
   Note that bracket text baked into a chart PNG's axis label (e.g. `[6]`) is
   NOT scanned by `check_refs.py` (it only reads the HTML, not image pixels) —
-  keep those numbers consistent with Annex B by hand; the tool can't catch a
+  keep those numbers consistent with Annex C by hand; the tool can't catch a
   mismatch there. **Also watch for a stray bracket typed outside a `<sup>`
   tag entirely** — `check_refs.py` will not flag it since its regex only
   matches inside `sup class="ref"` tags, so a bare `[n]` slips through
@@ -539,15 +561,15 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   non-numeric placeholder simply won't match either the inline or Annex-B
   regex — it won't show up as "missing" or "unused," it just silently
   doesn't count. **Never use a letter suffix to disambiguate a citation —
-  always mint a new integer.** Annex B numbers do not need to be contiguous,
+  always mint a new integer.** Annex C numbers do not need to be contiguous,
   only matched 1:1 against inline citations — deleting an unused reserved
   number and leaving a gap is completely fine and simpler than renumbering
-  everything after it. **Reusing the same Annex B number for multiple
+  everything after it. **Reusing the same Annex C number for multiple
   movers/figures citing the same outlet/method is fine and recommended** —
   `check_refs.py` only checks presence/absence, not uniqueness of use
   (editions 33-48 have all done this for stockanalysis.com single-stock
   closes and other repeatedly-used outlets, confirmed stable across fifteen
-  editions; edition 47 reused one shared Annex B number across thirteen
+  editions; edition 47 reused one shared Annex C number across thirteen
   different companies' SEC EDGAR 8-K filings, and edition 48 reused its SEC
   EDGAR number across four different filers — use this same-method,
   different-document reuse pattern whenever a single day has many
@@ -556,16 +578,38 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   logged prior-session baseline figures") is a legitimate, already-used
   pattern when disclosing a divergence against a previously-logged figure —
   editions 43 through 48 have all done this cleanly with `check_refs.py`.
-- **Structure:** 60-second read (5 ranked items) → 1 Market recap → 2
-  Equities and earnings (LEAD) → 3 Macro, policy and rates (condensed;
-  policy-rate table + prose, see the next bullet) → 4
+- **Structure:** correction box (only when there is one) → 60-second read
+  (5 ranked items) → 1 Market recap, **including sector performance** → 2
+  Equities and earnings (LEAD, **single stocks only**) → 3 Macro, policy and
+  rates (condensed; policy-rate table + prose, see below) → 4
   Commodities and FX (hard assets + FX only) → 5 Derivatives, volatility and
-  positioning (condensed, no credit) → 6 The day ahead → Annex A (what could
-  not be verified) → Annex B (sources) → Method note. **Do not duplicate the
+  positioning (condensed, no credit) → 6 The day ahead → Annex A
+  (assumptions, status, and the full record of any correction) → Annex B
+  (what could not be verified) → Annex C (sources) → Method note. **Do not duplicate the
   day-ahead calendar as both a prose paragraph (e.g. at the end of Section 3)
   and the Section 6 table — edition 47's first draft did exactly this and it
   was the single largest contributor to a 5-page overflow; Section 6's table
   is the one and only place the day-ahead calendar belongs.**
+- **The disclosure box is now a correction box — new at edition 49, by
+  request.** It used to carry assumptions, corrections and status notes
+  together at the top of page 1. Assumptions and status move to **Annex A**,
+  where a reader can go and look if they want them. What stays on page 1 is
+  **corrections only**: a figure published in an earlier edition that turned
+  out to be wrong, or a premise-level correction (a date, a person, an event
+  that did or didn't happen). Terse — what was published, what it should
+  have been — with the full record in Annex A if it needs more than a line.
+  **Omit the box entirely on an edition that corrects nothing**, which will
+  be most of them. The reasoning for the split: a reader who acted on
+  yesterday's wrong number will not go hunting through an annex to find out,
+  whereas nobody is harmed by missing a status note.
+- **All sector and ETF material belongs to Section 1 — new at edition 49, by
+  request.** Section 1 keeps its snap-grid tiles and recap paragraph and
+  gains the sector-ETF chart plus the narration of how each sector did in
+  the session. **Section 2 is purely single-stock**: movers chart, movers
+  table, earnings, guidance, analyst actions. The test is simple — if a
+  sentence is about a sector rather than about a named company, it goes in
+  Section 1. Section 6's "sector setup we take into [session]" bullets stay
+  where they are; they are forward-looking, not a recap of what happened.
 - **Section 3 carries a central-bank policy-rate table.** Other central
   banks' rates in a paragraph are the least readable thing in the document;
   put the levels in a table and keep the prose for what a table cannot hold.
@@ -574,7 +618,7 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   BoE, BoJ, ECB, SNB, Norges Bank, Riksbank, RBA, BoC and Banxico the window
   actually touches — eight to ten rows is the working range. A bank whose
   current rate could not be verified still gets its row, with that cell
-  marked unavailable and a matching Annex A entry; dropping the row hides the
+  marked unavailable and a matching Annex B entry; dropping the row hides the
   gap instead of disclosing it (though note: a bank that has genuinely never
   been part of this report's working rotation, like the ECB before edition
   48, can be reasonably left out rather than added fresh with an unresolved
@@ -585,21 +629,26 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   impact should be roughly neutral. If page 3 overflows anyway, cut rows
   that had no news in the window before cutting any prose. Follow the usual
   table convention — plain `<tr>` header rows, no `<thead>`.
-- **Charts:** 2 per edition, neither duplicating a table. Keep the
-  single-stock movers bar chart. Pick chart 2 by what the day's dominant
-  story actually is (see Chart #2 guidance under Production notes). **Chart
-  placement is editorial, not fixed to Section 2** — editions 24, 34, 39 and
-  44 all placed a CFTC-positioning chart #2 in Section 5 (Derivatives) rather
-  than Section 2, since that's where the content actually belongs; editions
-  45 through 48 all reverted to the sector-ETF-proxy default in its usual
-  Section 2 placement since no fresher CFTC data was due inside any of those
-  windows (next report Fri 23 Oct, covering Tue 20 Oct data — should be
-  fresh for whichever edition's window extends past 3:30pm ET that day,
-  likely edition 49).
+- **Charts: two fixed, a third only when earned — changed at edition 49.**
+  Placement is no longer editorial for the first two. The **sector-ETF
+  performance chart always goes in Section 1**, beside the sector narration
+  it illustrates, and the **single-stock movers bar always goes in Section
+  2**, with the names. Neither may duplicate a table.
+  A **third chart is allowed only when positioning or volatility is
+  genuinely the day's dominant story** — not merely present, and never to
+  fill a short page — and it goes in the section it belongs to: CFTC
+  asset-manager vs. leveraged-funds positioning or a VIX term structure in
+  Section 5, an implied-vs-realized earnings bar in Section 2. Editions 24,
+  34, 39 and 44 all ran a CFTC chart in Section 5 under the old rules, which
+  is the same placement this rule now makes explicit. **Three charts is real
+  pressure on four pages: the third chart is the first thing to drop when
+  the budget is tight**, after sector table rows with no news and before any
+  prose. Next CFTC report Fri 23 Oct, covering Tue 20 Oct data — fresh for
+  whichever edition's window extends past 3:30pm ET that day.
 - **Tilt:** market-wide. No portfolio tilt, no holdings commentary.
 - **Window:** everything since the previous edition's cutoff. On Mondays
   (or after any gap) this includes the weekend/missed sessions.
-- **Data gaps:** keep Annex A. State plainly what could not be verified.
+- **Data gaps:** keep Annex B. State plainly what could not be verified.
   Never estimate, infer, or fill from memory.
 - **Page margins:** 1 inch (25.4mm) top and bottom, 13mm left and right.
 - **Text alignment:** body prose (paragraphs, bullet lists) justified.
@@ -608,7 +657,7 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   cells or a dense multi-column list produces ugly ragged spacing.
 
 ## Hard rules
-- Every data point needs a named source. If unverifiable, say so in Annex A
+- Every data point needs a named source. If unverifiable, say so in Annex B
   rather than producing a plausible-sounding number.
 - Where sources disagree, use the more authoritative one **and** disclose
   the disagreement. AP's "How major US stock indexes fared" and the Reuters
@@ -674,7 +723,7 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   Treasury curve the one instrument class that reconciled perfectly against
   the prior edition's logged base and against Trading Economics. Treat as
   resolved/noise unless a fresh conflict appears.
-- Cross-check every inline `[n]` reference against Annex B (and vice versa)
+- Cross-check every inline `[n]` reference against Annex C (and vice versa)
   programmatically (compare sorted sets) rather than eyeballing it once
   source counts climb past ~30. **Run `check_refs.py` before, not just
   after, calling it done.** Editions 33 through 48 have all run clean (or
@@ -701,9 +750,10 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   2026, 3:30pm ET, covering Tuesday 20 October data** — check cftc.gov
   directly at edition 49 if its window extends past that release time (very
   likely for most plausible edition-49 cutoffs, and especially relevant given
-  this week's tech-selloff positioning angle), and re-evaluate chart #2
-  (fresh CFTC vs. sector-ETF-proxy default) based on what's actually
-  available.
+  this week's tech-selloff positioning angle), and decide on that basis
+  whether it earns the optional **third** chart in Section 5. Since edition
+  49 the sector-ETF panel is fixed in Section 1 and no longer competes with
+  it for a slot.
 - **The diffuse-overflow lesson from editions 44-45 and the duplicated-
   content lesson from edition 47 are both still worth checking first on any
   overflow** — edition 48 rendered clean at 4 pages on the first attempt with
@@ -799,9 +849,10 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   data was due). **The next report is due Friday 23 October 2026, 3:30pm ET,
   covering Tuesday 20 October data** — check cftc.gov directly at edition 49
   if its window extends past that release time, likely for most plausible
-  edition-49 cutoffs; re-evaluate chart #2 (fresh CFTC vs. sector-ETF-proxy
-  default) based on what's actually available — this is especially relevant
-  given this week's tech-sector selloff and positioning angle.
+  edition-49 cutoffs; if it has posted, judge whether it earns the optional
+  **third** chart in Section 5 — especially relevant given this week's
+  tech-sector selloff and positioning angle. It no longer displaces the
+  sector-ETF panel, which is fixed in Section 1 from edition 49.
 - **GBP/USD clean close:** remains fully resolved since edition 37, now
   reconciling cleanly for a **fourth straight edition (45-48)**. **EUR/USD
   and USD/JPY, which both showed a genuine vendor-revision shift at edition
@@ -941,9 +992,11 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   rendered cleanly. **Reuse this exact pattern** for any future
   grouped/multi-series chart rather than re-deriving the legend-placement
   fix from scratch. **This chart has not been used since edition 44 — the
-  next time fresh CFTC data is available (expected edition 49), re-evaluate
-  whether this is again the right chart #2, especially given the tech-
-  selloff positioning angle this week.**
+  next time fresh CFTC data is available (expected edition 49), judge
+  whether the story earns the optional **third** chart in Section 5 —
+  especially given the tech-selloff positioning angle this week. Under the
+  edition-49 rules this is an addition, not a substitution: it no longer
+  replaces the sector panel.**
 - PDF: HTML → Chromium print-to-PDF via Playwright. Launch Chromium with an
   explicit `executablePath` (check the environment for the installed
   Chromium build path) and `--no-sandbox`. Do not run `playwright install`.
@@ -952,11 +1005,25 @@ stocks & earnings, ~20% macro, ~20% commodities/FX, ~15% derivatives.**
   the margin). Passing `{top:'1in', bottom:'1in', left:'13mm', right:'13mm'}`
   via `page.pdf()` with the HTML body at `margin:0; padding:0` and no CSS
   `@page` block is the pattern that has worked reliably.
-- **Only ONE forced `page-break-before` in the whole document: immediately
-  before Annex A.** Let sections 1–6 flow naturally — a stray extra break
-  produces a 5-page PDF with a mostly-blank orphan page. `grep -n
-  'pagebreak'` before troubleshooting anything else if page count looks
-  wrong. Always check for content duplication across sections first when a
+- **At most ONE forced `page-break-before` in the whole document:
+  immediately before Annex A — and on a spillover edition, none at all.**
+  Let sections 1-6 flow naturally; never add a break between them. The rule
+  from edition 49:
+    - Sections 1-6 end on page 3 (the common case) → keep the break. The
+      annex opens a clean page 4, exactly as before.
+    - Sections 1-6 spill onto page 4 → **delete the `pagebreak` div and
+      re-render**, so the annex follows the spillover down page 4 instead of
+      starting a fifth page.
+    - Still five pages with the break gone → now trim, in this order: sector
+      table rows with no news in the window, the third chart if there is
+      one, then prose.
+  So `grep -c 'pagebreak'` should return 1, or 0 on a spillover edition,
+  never 2. This cannot be done in CSS — no print rule says "break only if
+  what follows would start a new page anyway" — so it is a decision taken
+  after reading the rendered page images, not at drafting time. A stray
+  extra break still produces a 5-page PDF with a mostly-blank orphan page,
+  and that looks identical to a spillover edition that kept its break, so
+  check the count before anything else when the page count is wrong. Always check for content duplication across sections first when a
   draft overflows — it has twice been the cheapest, highest-leverage fix.
 - `<thead>` on the two-column tables pushes the layout to 5 pages — leave
   header rows as plain `<tr>`. Plain-`<tr>` tables reflow across a page
@@ -992,10 +1059,11 @@ across whichever sections are longest — not loosening the CSS further.)
   contributor to edition 39's overflow).
 - Bullet lists (`ul.bullets`): **1.0px** margin-bottom per `li` (tightened
   from 1.4px).
-- Annex A: two columns at 7.1pt, `break-inside:avoid` per `li` (left-aligned
+- Annex A: two columns at 7.1pt, same treatment as Annex B below.
+- Annex B: two columns at 7.1pt, `break-inside:avoid` per `li` (left-aligned
   — reads cleanly at this width; justify only if it still looks clean after
   testing).
-- Annex B: three columns at 5.5pt, left-aligned.
+- Annex C: three columns at 5.5pt, left-aligned.
 - Content budget: 60-second read (5 items); equities as the largest block
   plus the movers table; macro/commodities/derivatives tighter; **a "This
   week's known catalysts" table plus a "Sector setup we take into [session]"
@@ -1020,36 +1088,46 @@ across whichever sections are longest — not loosening the CSS further.)
   across sections FIRST before diffuse trimming; if no duplication is found,
   trim a little from several sections rather than gutting one.**
 
-**Chart #2 selection guidance:** pick by what the day's dominant story
-actually is. Macro/rotation with no fresher signal → SPDR sector-ETF proxy
-(same-day closes, the standing default — used across twenty-three eligible
-editions, 25 through 48, with editions 34, 39 and 44 the exceptions when
-fresher CFTC data was available; editions 45 through 48 all reverted to this
-default since the CFTC's next report was not yet due inside any of those
-windows). Fresh CFTC CoT data on a Monday/weekend-window edition → the
-ES/NQ/RTY asset-manager-vs-leveraged-funds positioning chart, normalized as
-% of open interest, built with the grouped-bar technique documented under
-Production notes, placed in Section 5 (Derivatives) per the editions
-24/34/39/44 precedent. A single dominant earnings print with a clean,
-well-sourced implied-vs-realized-move story → a three-bar implied/
-historical-average/realized move chart (the historical-average leg has
-never actually been sourced successfully). A genuine multi-sector
-broadening/deepening selloff across consecutive sessions → the sector-ETF
-proxy rendered as a grouped (day-over-day) bar instead of single-day. A
-holiday-window preview edition with no fresher data → VIX futures term
-structure with event annotations. When chart 1 (movers) already covers the
-earnings/single-name story, the sector proxy (or a fresh CFTC positioning
-chart, when available) is a good complementary choice even on a stock-heavy
-day, since the two stories reinforce rather than duplicate each other —
-editions 46 through 48 all used exactly this combination on high-earnings-
-volume sessions. **Edition 49 should check cftc.gov's freshness first** (the
-Friday 23 Oct report, covering Tuesday 20 Oct) before defaulting back to the
-sector-ETF proxy — if CFTC data has posted fresh by edition 49's cutoff
-(likely for most plausible cutoffs given the 3:30pm ET release time), use
-the fresh CFTC chart per the established technique, which would also be
-particularly well-timed given this week's tech-sector selloff and
-positioning angle; otherwise revert to the sector-ETF-proxy default as
-usual. **Remember the figsize-scales-to-category-count guidance above
+**Chart selection guidance — rewritten at edition 49.** Placement is no
+longer editorial for the first two charts, so the old "pick chart #2 by the
+day's story" decision no longer exists:
+
+- **Sector-ETF performance chart → Section 1 (Market recap), every
+  edition.** Same-day closes by default; a grouped day-over-day bar instead
+  on a multi-session or weekend window, or on a genuine multi-sector
+  broadening selloff across consecutive sessions. This was already the
+  standing default across twenty-three eligible editions (25-48); what has
+  changed is that it is now mandatory and sits beside the sector narration
+  in Section 1 rather than in Section 2.
+- **Single-stock movers bar → Section 2 (Equities), every edition.**
+- **A third chart only when positioning or volatility is genuinely the
+  day's dominant story**, never to fill a page, placed in the section it
+  belongs to:
+  - Fresh CFTC CoT data on a Monday/weekend-window edition → the ES/NQ/RTY
+    asset-manager-vs-leveraged-funds positioning chart, normalized as % of
+    open interest, built with the grouped-bar technique documented under
+    Production notes, in **Section 5**. Editions 24, 34, 39 and 44 all
+    placed it there under the old rules.
+  - A single dominant earnings print with a clean, well-sourced
+    implied-vs-realized-move story → a three-bar implied/historical-average/
+    realized move chart in **Section 2**. Note the historical-average leg
+    has never actually been sourced successfully.
+  - A holiday-window preview edition with no fresher data → VIX futures
+    term structure with event annotations, in **Section 5**.
+
+**Three charts is real pressure on a four-page document.** The third chart
+is the first thing to drop when the budget is tight — after sector table
+rows with no news, before any prose. If in doubt, two charts.
+
+**Edition 49 should still check cftc.gov's freshness** (the Friday 23 Oct
+report, covering Tuesday 20 Oct) — but that check now decides whether a
+*third* chart is warranted, not which chart #2 to run. Given the 3:30pm ET
+release time it will likely have posted by most plausible cutoffs, and this
+week's tech-sector selloff makes the positioning angle genuinely topical, so
+it is a reasonable candidate for the third slot rather than an automatic
+one.
+
+**Remember the figsize-scales-to-category-count guidance above
 (ceiling `(9.8, 1.95)` for an 11-category panel, `(9.8, 2.15)` for the
 3-category grouped CFTC chart, scale down for fewer single-series
 categories), that an 11-category sector-ETF panel should default to
@@ -1328,8 +1406,8 @@ Wed 28 Oct decision was only secondary-sourced at edition 48 — worth a
 direct primary fetch given it lands the same day as the FOMC decision. The
 CFTC CoT report due Fri 23 Oct 3:30pm ET (covering Tue 20 Oct data) should
 land inside edition 49's window if its cutoff extends past 3:30pm ET that
-day — re-evaluate chart #2 selection accordingly, especially given this
-week's tech-selloff positioning angle. **The FOMC decision itself (Oct
+day — judge whether it earns the optional third chart in Section 5
+accordingly, especially given this week's tech-selloff positioning angle. **The FOMC decision itself (Oct
 27-28) is now the dominant upcoming catalyst — whichever edition's covered
 session falls on or after Oct 27-28 should lead with it.**
 federalregister.gov's direct search interface returned a bot-protection

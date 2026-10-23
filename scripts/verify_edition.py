@@ -24,6 +24,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# Still four, and still exact. Sections 1-6 may now spill onto page 4 with the
+# annex following below them, but that moves the boundary inside the document
+# rather than adding a page: a 5-page PDF means the forced break before Annex A
+# was left in on a spillover edition, or there is genuinely too much copy.
 EXPECTED_PAGES = 4
 MIN_PDF_BYTES = 40_000
 MIN_SPEC_BYTES = 8_000
@@ -53,8 +57,12 @@ REQUIRED_SECTIONS = [
     # header cell rather than any bank's name: which banks appear depends on
     # the window, but the first column header does not.
     ("Policy-rate table", r"Central\s*bank"),
+    # Three annexes from edition 49: A assumptions/corrections/status,
+    # B unverified items, C sources. A PDF missing Annex C is the tell that a
+    # run followed the old two-annex structure and put sources under B.
     ("Annex A", r"Annex\s*A"),
     ("Annex B", r"Annex\s*B"),
+    ("Annex C", r"Annex\s*C"),
     ("Method note", r"Method\s*(note|:)"),
 ]
 
