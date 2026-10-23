@@ -32,10 +32,17 @@ same standing fact differently, that disagreement is a signal worth chasing.
 
 | Pass | Weight | Covers |
 |---|---|---|
-| Equities & earnings | ~45% | Index closes, sector rotation, single-stock movers, earnings/guidance, analyst actions |
+| Equities & earnings | ~45% | Index closes, sector performance, single-stock movers, earnings/guidance, analyst actions |
 | Macro & policy | ~20% | Central banks, rate-path odds, inflation/jobs prints, trade/tariffs, day-ahead calendar with consensus |
 | Commodities & FX | ~20% | Oil, gas, gold, copper; DXY and major crosses. No agriculture |
 | Derivatives & positioning | ~15% | VIX and vol term structure, options flow/skew/gamma, CFTC CoT, funding. No credit spreads |
+
+These are research passes, not document sections. The equities pass still
+gathers index closes and sector performance even though both are written up
+in section 1 rather than section 2 — don't let the section boundary quietly
+drop the sector data from what gets researched. The ~45% weight is the
+briefing's shape, not a cap on its length: section 1's sector coverage is on
+top of it, not carved out of it.
 
 Give each subagent: the exact window and cutoff, what the previous edition
 already covered (so it doesn't duplicate), the sourcing rules below, and an
@@ -93,7 +100,7 @@ A settled fact re-opens on three triggers, and otherwise not at all:
 A date does not promote itself. A future meeting date stays live until it
 passes; only afterwards is it settled history.
 
-Anything still unresolved goes in Annex A as unavailable. Never estimate,
+Anything still unresolved goes in Annex B as unavailable. Never estimate,
 infer, or reconstruct a number from memory.
 
 ### 4. Build
@@ -101,9 +108,12 @@ infer, or reconstruct a number from memory.
 Read `references/format.md` for the locked structure, the CSS baseline, chart
 selection guidance, and the layout traps. Then:
 
-- Generate two charts with `scripts/make_charts.py` (edit the data arrays at the
-  top). Chart 1 is always single-stock movers; pick chart 2 by what the day's
-  dominant story actually is. Neither chart may duplicate a table.
+- Generate two charts with `scripts/make_charts.py` (edit the data arrays at
+  the top). Both are fixed now: the **sector-ETF performance** chart in
+  section 1 beside the sector narration, and the **single-stock movers** bar
+  in section 2. A third chart is allowed only when positioning or volatility
+  is genuinely the day's dominant story, and goes in the section it belongs
+  to. No chart may duplicate a table.
 - Write `briefing.html` following the structure in `references/format.md`.
 - Assign source numbers sequentially as you draft, rather than renumbering
   afterward — post-hoc renumbering reliably produces orphaned references.
@@ -112,15 +122,26 @@ selection guidance, and the layout traps. Then:
 
 ```bash
 grep -c '~' briefing.html                    # expect 0 — write "approx." instead
-python3 scripts/check_refs.py briefing.html  # inline [n] vs Annex B, both ways
+python3 scripts/check_refs.py briefing.html  # inline [n] vs Annex C, both ways
 node scripts/render_pdf.js briefing.html Daily_Economic_Briefing_YYYY-MM-DD.pdf
 pdftoppm -png -r 72 Daily_Economic_Briefing_*.pdf page
 ```
 
 Then actually read the page images. Page count alone does not tell you whether
-a page broke badly or ran half-empty. Expect exactly 4 pages; if you get 5, the
-cause is almost always a stray forced page break rather than genuine overflow —
-check that before trimming copy.
+a page broke badly or ran half-empty.
+
+**Four pages, hard.** If you get 5, work through it in this order:
+
+1. **A stray forced page break.** Still the most common cause. `grep -c
+   pagebreak briefing.html` should return 1 — or 0, see below. Never 2.
+2. **Sections 1–6 spilled onto page 4.** That is allowed. Delete the one
+   `pagebreak` div and re-render so the annex follows the spillover down page
+   4 rather than starting a fifth page.
+3. **Only then trim**, in this order: sector table rows with no news in the
+   window, the optional third chart, then prose.
+
+Page 3 running *short* is the opposite problem and has its own fix — see
+"Filling a short page 3" in `references/format.md`.
 
 ### 6. Deliver
 

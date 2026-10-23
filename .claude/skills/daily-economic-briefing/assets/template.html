@@ -32,7 +32,7 @@
   .box h3 { margin-top:0; color:#7a5410; }
   .chart-wrap { text-align:center; margin:2px 0 3px 0; }
   .chart-wrap img { width:100%; height:auto; display:block; }
-  .pagebreak { page-break-before:always; }   /* USE EXACTLY ONCE: before Annex A */
+  .pagebreak { page-break-before:always; }   /* AT MOST ONCE: before Annex A, and dropped on a spillover edition */
   .cols2 { columns:2; column-gap:10px; font-size:7.1pt; text-align:left; }
   .cols2 li { break-inside:avoid; margin-bottom:1.6px; }
   .cols3 { columns:3; column-gap:8px; font-size:5.5pt; text-align:left; }
@@ -46,9 +46,11 @@
 <h1>Daily Economic Briefing</h1>
 <div class="meta">[Date] &nbsp;|&nbsp; Window: [session] &nbsp;|&nbsp; Research cutoff [time] &nbsp;|&nbsp; Edition [n]</div>
 
+<!-- Corrections only, and only when there are any. Omit the whole box on an
+     edition that corrects nothing. Assumptions and status live in Annex A. -->
 <div class="box">
-<h3>Assumptions, corrections and status this edition</h3>
-<ul class="bullets"><li>…</li></ul>
+<h3>Correction</h3>
+<ul class="bullets"><li>Edition [n] gave […]; the correct figure is […].</li></ul>
 </div>
 
 <h2>60-second read</h2>
@@ -61,10 +63,12 @@
   <div class="tile"><span class="label">S&amp;P 500</span><span class="value">—</span><span class="chg down">—</span></div>
 </div>
 <p>…</p>
+<h3>Sector performance</h3>
+<div class="chart-wrap"><img src="chart2_panel.png" alt="Sector performance"></div>
+<p>…</p>
 
 <h2>2. Equities and earnings</h2>
-<div class="chart-wrap"><img src="chart2_panel.png" alt="Sector rotation"></div>
-<h3>Single-stock movers</h3>
+<!-- Single stocks only. No sector or ETF material here — it belongs above. -->
 <div class="chart-wrap"><img src="chart1_movers.png" alt="Single-stock movers"></div>
 <table><tr><th>Ticker</th><th>Move</th><th>Driver</th></tr></table>
 
@@ -83,17 +87,23 @@
 <h3>Sector setup we take into [session]</h3>
 <ul class="bullets"><li>…</li></ul>
 
+<!-- Keep this break when sections 1-6 end on page 3. DELETE it and re-render
+     when they spill onto page 4, so the annex follows the spillover instead of
+     being pushed to a fifth page. Four pages is still the hard limit. -->
 <div class="pagebreak"></div>
 
-<h2>Annex A — Data points sought but not verified this edition</h2>
+<h2>Annex A — Assumptions, corrections and status</h2>
 <ul class="cols2"><li>…</li></ul>
 
-<h2>Annex B — Sources</h2>
+<h2>Annex B — Data points sought but not verified this edition</h2>
+<ul class="cols2"><li>…</li></ul>
+
+<h2>Annex C — Sources</h2>
 <ul class="cols3"><li>[1] …</li></ul>
 
-<div class="method"><b>Method:</b> every figure traces to a named source in Annex B; where
+<div class="method"><b>Method:</b> every figure traces to a named source in Annex C; where
 sources disagreed, the better-corroborated figure was used and the conflict disclosed.
-Nothing estimated or filled from memory — unverifiable items are listed in Annex A.
+Nothing estimated or filled from memory — unverifiable items are listed in Annex B.
 Not investment advice.</div>
 
 </body>
