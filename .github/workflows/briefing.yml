@@ -192,6 +192,18 @@ jobs:
                instruction the next run will get — never truncate a section or
                drop a rule unless you meant to.
 
+               The spec you are carrying forward is
+               ${{ steps.gate.outputs.spec_bytes }} bytes. Once that is over
+               100,000, condense the edition log this run — fold the oldest
+               full-detail entries into the existing condensed ranges, exactly
+               as the log already does from time to time. Condense the LOG;
+               never drop a rule, a standing fact or an open thread to save
+               space. There is no size limit any more, so this is about keeping
+               your own instructions readable rather than passing a check: on
+               28 October 2026 the spec reached 127,499 bytes, the ceiling that
+               then existed rejected it, and the edition it had just published
+               was lost from the log.
+
             Two header details earlier editions got wrong:
 
               - The document's date line is the EDITION date above, not the

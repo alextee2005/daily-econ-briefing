@@ -31,10 +31,23 @@ REPO = Path(__file__).resolve().parent.parent
 EXPECTED_PAGES = 4
 MIN_PDF_BYTES = 40_000
 MIN_SPEC_BYTES = 8_000
-MAX_SPEC_BYTES = 120_000
 # A rewrite that loses more than this much of the previous spec is treated as a
 # truncation rather than a deliberate edit.
 MIN_SPEC_RATIO = 0.60
+
+# There is deliberately no maximum. A 120,000-byte ceiling used to reject an
+# oversized spec outright, which went badly on 28 October 2026: the spec came
+# in at 127,499 bytes, the update was discarded, and the next run lost the
+# edition it had just published from its own log. Worse, the rejection was
+# self-sustaining — each failed run restarted from the same oversized base, so
+# it would have failed again every morning. Growth costs tokens; it does not
+# make the spec wrong, and a hard stop on it threw away correct work.
+#
+# What replaces it is advisory. Over this threshold the run is told to condense
+# its edition log, which the spec already does sporadically on its own. The
+# size and its change are reported every run either way, so growth is visible
+# long before it matters rather than arriving as a surprise rejection.
+CONDENSE_THRESHOLD = 100_000
 
 # The locked structure, checked against the rendered PDF as a regex per
 # section, because the documents do not use the spec's labels verbatim: the
@@ -173,7 +186,9 @@ def verify_spec(new: Path, prev: Path, edition_date: str) -> bool:
     size = len(text.encode("utf-8"))
     prev_size = len(prev.read_text(encoding="utf-8").encode("utf-8")) if prev.is_file() else 0
 
-    good = check("size within bounds", MIN_SPEC_BYTES <= size <= MAX_SPEC_BYTES, f"{size:,} bytes")
+    # Only a floor. A spec that is too small is half-written; one that is large
+    # is merely expensive, and rejecting it loses the edition it just logged.
+    good = check("not half-written", size >= MIN_SPEC_BYTES, f"{size:,} bytes")
 
     if prev_size:
         ratio = size / prev_size
@@ -182,6 +197,20 @@ def verify_spec(new: Path, prev: Path, edition_date: str) -> bool:
             ratio >= MIN_SPEC_RATIO,
             f"{ratio:.0%} of {prev_size:,} bytes",
         )
+
+    # Reported, never a verdict. Both lines exist so that growth is something
+    # you watch creeping up rather than something you learn about from a
+    # rejected run.
+    delta = f"{size - prev_size:+,} vs previous" if prev_size else "no previous spec"
+    print(f"  NOTE  size {size:,} bytes ({delta})")
+    if size > CONDENSE_THRESHOLD:
+        print(f"  NOTE  over {CONDENSE_THRESHOLD:,} — the next run is told to "
+              f"condense its edition log. This does not fail the run.")
+        summary_rows.append(("spec size", True,
+                             f"{size:,} bytes ({delta}) — over "
+                             f"{CONDENSE_THRESHOLD:,}, condensing advised"))
+    else:
+        summary_rows.append(("spec size", True, f"{size:,} bytes ({delta})"))
 
     # The edition log is how the next run learns where its window starts and
     # what not to repeat. It is the one piece of structure the pipeline itself
