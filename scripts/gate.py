@@ -145,6 +145,10 @@ def decide(now_utc: datetime, repo: Path, force: bool, edition_date: date | None
         "sessions_covered": ",".join(d.isoformat() for d in covered) or "none",
         "prev_edition_date": prev_ed.isoformat() if prev_ed else "none",
         "spec_path": str(spec.relative_to(repo)),
+        # Surfaced so the run can be told how big the thing it is carrying
+        # forward already is. Verification only sees the size afterwards,
+        # which is too late to act on it.
+        "spec_bytes": str(spec.stat().st_size),
         "next_spec_path": str(next_spec.relative_to(repo)),
         "pdf_path": f"editions/Daily_Economic_Briefing_{ed_date}.pdf",
     }
