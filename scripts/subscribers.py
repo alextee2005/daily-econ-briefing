@@ -16,7 +16,7 @@ entitled to the briefing, and neither is the same as having said no:
                   message still sitting in Telegram's 24-hour backlog cannot
                   quietly re-propose them as a candidate tomorrow.
 
-Nothing moves from pending to approved on its own. That separation is the
+Nothing moves from pending to approved on its own, except a payment. That separation is the
 whole point: an open list would mean whoever discovers the bot receives the
 briefing and spends the owner's Telegram quota. `/start` therefore asks to be
 considered; it does not enrol.
@@ -67,6 +67,15 @@ MSG = {
     "already-subscribed": "You are already subscribed. Send /stop to unsubscribe.",
     "owner-stop": ("You are the owner of this briefing. Your own copy is configured "
                    "in the repository, not by this bot, so it will keep arriving."),
+    # Sent by the Worker the moment Stripe confirms, not at the next drain:
+    # someone who has just paid and hears nothing for five minutes assumes it
+    # failed. Duplicated in worker/src/index.js because the Worker cannot
+    # fetch this file and still answer instantly; test_subscribers.py compares
+    # the two so they cannot drift.
+    "paid": ("Payment received — thank you. Your subscription runs for a year "
+             "from today, and the next briefing is on its way."),
+    "cancelled": ("Your subscription will not renew. You keep receiving the "
+                  "briefing until the year you have paid for runs out."),
 }
 
 # What the owner can do from the chat itself, so approving does not mean opening
@@ -284,7 +293,8 @@ def apply_queue(items: list, data: dict, owner: int | None) -> tuple[dict, list]
     for item in items:
         verb, cid = item.get("verb"), item.get("chat_id")
         ctype = item.get("type", "?")
-        if not isinstance(cid, int) or verb not in ("start", "stop", "approve", "deny"):
+        if not isinstance(cid, int) or verb not in (
+                "start", "stop", "approve", "deny", "paid", "cancelled"):
             notes.append(f"{item.get('id', '?')}: ignored, not a decision I understand")
             continue
 
@@ -312,6 +322,64 @@ def apply_queue(items: list, data: dict, owner: int | None) -> tuple[dict, list]
                 data["unsubscribed"].append({"chat_id": cid, "type": ctype,
                                              "stopped": date.today().isoformat()})
             notes.append(f"{cid}: {'removed and' if was else ''} opted out".replace("  ", " "))
+
+        elif verb == "paid":
+            # Payment auto-approves, by decision: someone who has just paid
+            # should not then wait on a human. The owner's Approve/Deny
+            # buttons stay for comps and for anything that arrives without a
+            # payment.
+            #
+            # Idempotency here is not the usual "applying twice is a no-op" —
+            # applying twice would grant two years. The Stripe event id is
+            # recorded on the entry and a replay of the same event is skipped,
+            # which matters because the queue is at-least-once by design.
+            event_id = item.get("event_id")
+            years = item.get("years", 1)
+
+            entry = next((e for e in data["approved"] if e["chat_id"] == cid), None)
+            if entry is None:
+                entry = next((e for e in data["pending"] if e["chat_id"] == cid), None)
+                if entry is None:
+                    entry = next((e for e in data["unsubscribed"]
+                                  if e["chat_id"] == cid), None)
+                    if entry is not None:
+                        entry = dict(entry)
+                        entry.pop("stopped", None)
+                if entry is None:
+                    entry = {"chat_id": cid, "type": ctype}
+                else:
+                    entry = dict(entry)
+                entry.setdefault("added", date.today().isoformat())
+                data["pending"] = [e for e in data["pending"] if e["chat_id"] != cid]
+                data["unsubscribed"] = [e for e in data["unsubscribed"]
+                                        if e["chat_id"] != cid]
+                data["approved"].append(entry)
+
+            if event_id and entry.get("last_payment_event") == event_id:
+                notes.append(f"{cid}: payment {event_id} already applied, no change")
+                continue
+
+            entitlement.grant(entry, date.today(), "paid", years)
+            if event_id:
+                entry["last_payment_event"] = event_id
+            for key in ("stripe_customer_id", "stripe_subscription_id"):
+                if item.get(key):
+                    entry[key] = item[key]
+            notes.append(f"{cid}: paid, access through {entry['paid_until']}")
+
+        elif verb == "cancelled":
+            # Stops the renewal. Deliberately does NOT revoke: they paid for a
+            # year, and cancelling does not buy back the months already paid
+            # for. paid_until is left exactly as it is and simply runs out.
+            entry = next((e for e in data["approved"] if e["chat_id"] == cid), None)
+            if entry is None:
+                notes.append(f"{cid}: cancelled, but not on the list — no change")
+            elif entry.get("plan") == "cancelled":
+                notes.append(f"{cid}: already marked cancelled, no change")
+            else:
+                entry["plan"] = "cancelled"
+                notes.append(f"{cid}: will not renew, access runs to "
+                             f"{entry.get('paid_until', 'its existing expiry')}")
 
         elif verb == "approve":
             data["unsubscribed"] = [e for e in data["unsubscribed"] if e["chat_id"] != cid]

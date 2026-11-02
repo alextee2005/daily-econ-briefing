@@ -278,8 +278,15 @@ expect("approval is answered with the approved wording",
 expect("/stop is answered with the unsubscribe wording",
        MSG["stopped"],
        "We have received your unsubscribe request. Please give us time to process it.")
+# Asserted as "nothing is missing" rather than as an exact key set, because
+# MSG also carries wording the Worker sends directly and Python never does.
+# An exact set would have to be edited for each of those, which turns a real
+# guard into a chore and eventually into a rubber stamp.
+SPOKEN = subscribers.STATE_OUTCOMES | {"owner-stop"}
 expect("every outcome the code can produce has a message",
-       sorted(MSG), ["already-subscribed", "approved", "owner-stop", "pending", "stopped"])
+       sorted(o for o in SPOKEN if o not in MSG), [])
+expect("and the only extras are the ones the Worker sends on payment",
+       sorted(set(MSG) - SPOKEN), ["cancelled", "paid"])
 
 # Approval must notify, and must notify only on a real transition — the owner
 # re-running the workflow should not message a subscriber again each time.
@@ -659,6 +666,79 @@ expect("and names the reason for each",
 expect("the report carries nothing but the id, plan and verdict",
        sorted({k for r in ROWS for k in r}),
        ["chat_id", "detail", "entitled", "plan", "state"])
+
+# --- payments arriving through the queue -----------------------------------
+# The queue is at-least-once, so the danger here is not the usual "applying
+# twice is a no-op" — applying a payment twice would grant two years for one
+# charge. Idempotency is carried by the Stripe event id.
+PAID = {"id": "z-stripe-evt_1", "verb": "paid", "chat_id": 777,
+        "event_id": "evt_1", "years": 1,
+        "stripe_customer_id": "cus_1", "stripe_subscription_id": "sub_1"}
+
+d, notes = apply_queue([PAID], fresh(), OWNER)
+got = d["approved"][0]
+expect("a payment from an unknown chat enrols them without owner approval",
+       [e["chat_id"] for e in d["approved"]], [777])
+expect("and grants a year, recording the plan",
+       (got["plan"], bool(got["paid_until"])), ("paid", True))
+expect("and keeps the Stripe ids for later reconciliation",
+       (got["stripe_customer_id"], got["stripe_subscription_id"]), ("cus_1", "sub_1"))
+
+# The one that would cost real money if it were wrong.
+first = got["paid_until"]
+d, _ = apply_queue([PAID], d, OWNER)
+expect("replaying the same Stripe event does not grant a second year",
+       d["approved"][0]["paid_until"], first)
+
+# A genuine renewal, a different event, must extend.
+d, _ = apply_queue([{**PAID, "id": "z-stripe-evt_2", "event_id": "evt_2"}], d, OWNER)
+expect("a different payment event does extend access",
+       d["approved"][0]["paid_until"] > first, True)
+
+# Paying after opting out should bring someone back rather than leaving them
+# on the unsubscribed list and silently never delivering.
+d_out = fresh()
+d_out["unsubscribed"].append({"chat_id": 777, "type": "private",
+                              "stopped": "2026-01-01"})
+d_out, _ = apply_queue([PAID], d_out, OWNER)
+expect("paying after unsubscribing re-enrols the payer",
+       ([e["chat_id"] for e in d_out["approved"]],
+        [e["chat_id"] for e in d_out["unsubscribed"]]), ([777], []))
+
+# A pending chat that pays is promoted, not duplicated.
+d_pend = fresh()
+d_pend["pending"].append({"chat_id": 777, "type": "private", "seen": "2026-11-01"})
+d_pend, _ = apply_queue([PAID], d_pend, OWNER)
+expect("paying while pending promotes rather than duplicating",
+       (len(d_pend["approved"]), len(d_pend["pending"])), (1, 0))
+
+# The owner is excluded from every queued decision, payments included.
+d_own, _ = apply_queue([{**PAID, "chat_id": OWNER}], fresh(), OWNER)
+expect("a payment attributed to the owner is skipped", len(d_own["approved"]), 0)
+
+# --- cancellation must not revoke ------------------------------------------
+d_can = fresh()
+d_can["approved"].append({"chat_id": 777, "paid_until": "2027-11-02", "plan": "paid"})
+d_can, _ = apply_queue([{"id": "z-stripe-evt_c", "verb": "cancelled",
+                         "chat_id": 777, "event_id": "evt_c"}], d_can, OWNER)
+expect("cancelling stops the renewal but keeps the year already paid for",
+       (d_can["approved"][0]["plan"], d_can["approved"][0]["paid_until"]),
+       ("cancelled", "2027-11-02"))
+
+d_can, _ = apply_queue([{"id": "z-stripe-evt_c", "verb": "cancelled",
+                         "chat_id": 777, "event_id": "evt_c"}], d_can, OWNER)
+expect("and cancelling twice changes nothing",
+       d_can["approved"][0]["paid_until"], "2027-11-02")
+
+d_none, notes = apply_queue([{"id": "x", "verb": "cancelled", "chat_id": 999999}],
+                            fresh(), OWNER)
+expect("cancelling someone not on the list is reported, not an error",
+       len(d_none["approved"]), 0)
+
+# A cancelled subscriber still receives until their year runs out. This is the
+# whole point of not revoking, so it is checked end to end rather than implied.
+expect("a cancelled but unexpired subscriber still receives the briefing",
+       subscribers.recipients(d_can, OWNER, PAY_TODAY, PAY_EDS), [OWNER, 777])
 
 # --- the one-off migration onto the paywall --------------------------------
 # Getting this wrong in the generous direction costs nothing; getting it wrong

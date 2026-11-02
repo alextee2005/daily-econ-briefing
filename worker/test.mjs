@@ -397,7 +397,13 @@ const queued = async (env) => {
   expect("health confirms each binding is present",
     body.config,
     { BOT_TOKEN: true, OWNER_CHAT_ID: true, WEBHOOK_SECRET: true,
-      DRAIN_SECRET: true, LIST_URL: true, QUEUE: true });
+      DRAIN_SECRET: true, LIST_URL: true, QUEUE: true,
+      STRIPE_WEBHOOK_SECRET: false });
+  // The paywall arrived after the rest of this Worker. A health check that
+  // reads "not ok" for months before anyone sets up Stripe is one people stop
+  // reading, so an absent Stripe secret is reported and not counted against it.
+  expect("an unconfigured Stripe secret does not make health unhealthy",
+    [body.ok, body.unconfigured], [true, ["STRIPE_WEBHOOK_SECRET"]]);
   expect("health never echoes a secret value",
     JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
   // A cached diagnostic reports a state that may be minutes old and is
@@ -450,6 +456,225 @@ const queued = async (env) => {
   await hook(env, msg(FRIEND, "thanks for the briefing"));
   expect("a plain message is ignored",
     [sent.length, (await queued(env)).length], [0, 0]);
+}
+
+
+// ---------------------------------------------------------------------------
+// Stripe
+//
+// Signature verification is the whole security of this endpoint: without it
+// anyone who learns the URL can POST a fabricated payment and subscribe
+// themselves free. So most of these cases are forgeries.
+// ---------------------------------------------------------------------------
+
+const WHSEC = "whsec_test_secret";
+
+async function stripeSig(secret, raw, t) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(`${t}.${raw}`));
+  const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `t=${t},v1=${hex}`;
+}
+
+/** POST an event to /stripe, signed unless `header` overrides it. */
+async function stripeHook(env, event, { secret = WHSEC, t = null, header = null } = {}) {
+  const raw = JSON.stringify(event);
+  const when = t ?? Math.floor(Date.now() / 1000);
+  const sig = header ?? (await stripeSig(secret, raw, when));
+  return worker.fetch(new Request("https://w.test/stripe", {
+    method: "POST",
+    headers: { "content-type": "application/json", "stripe-signature": sig },
+    body: raw,
+  }), env);
+}
+
+const checkout = (chat, id = "evt_1") => ({
+  id, type: "checkout.session.completed",
+  data: { object: { client_reference_id: String(chat), customer: "cus_1",
+                    subscription: "sub_1" } },
+});
+
+// --- a genuine first payment ----------------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await stripeHook(env, checkout(FRIEND));
+  expect("a correctly signed checkout is accepted", r.status, 200);
+  const q = await queued(env);
+  expect("it queues one paid decision for the right chat",
+    q.map((i) => [i.verb, i.chat_id, i.years]), [["paid", FRIEND, 1]]);
+  expect("carrying the Stripe ids for later reconciliation",
+    [q[0].stripe_customer_id, q[0].stripe_subscription_id], ["cus_1", "sub_1"]);
+  expect("and the payer is told immediately, not at the next drain",
+    sent.map((s) => [s.method, s.body.chat_id]), [["sendMessage", FRIEND]]);
+}
+
+// --- forgeries -------------------------------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await stripeHook(env, checkout(STRANGER), { secret: "whsec_wrong" });
+  expect("a signature from the wrong secret is refused", r.status, 400);
+  expect("and nothing is queued", (await queued(env)).length, 0);
+  expect("and nobody is told anything", sent.length, 0);
+}
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await stripeHook(env, checkout(STRANGER), { header: "t=1,v1=deadbeef" });
+  expect("a hand-written signature header is refused", r.status, 400);
+}
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await stripeHook(env, checkout(STRANGER), { header: "" });
+  expect("no signature header at all is refused", r.status, 400);
+}
+{
+  // Replay: a real, correctly signed delivery captured and sent again later.
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const old = Math.floor(Date.now() / 1000) - 3600;
+  const r = await stripeHook(env, checkout(STRANGER), { t: old });
+  expect("a correctly signed but hour-old delivery is refused as a replay",
+    r.status, 400);
+  expect("and grants nothing", (await queued(env)).length, 0);
+}
+{
+  // The Worker deployed before Stripe is set up at all.
+  const env = harness();
+  const r = await stripeHook(env, checkout(FRIEND));
+  expect("with no STRIPE_WEBHOOK_SECRET set, everything is refused", r.status, 400);
+  expect("and no payment is invented", (await queued(env)).length, 0);
+}
+{
+  // The body must be signed byte-for-byte. A tampered body with a valid
+  // signature for the original must not pass.
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const original = JSON.stringify(checkout(FRIEND));
+  const t = Math.floor(Date.now() / 1000);
+  const sig = await stripeSig(WHSEC, original, t);
+  const tampered = JSON.stringify(checkout(STRANGER));
+  const r = await worker.fetch(new Request("https://w.test/stripe", {
+    method: "POST",
+    headers: { "content-type": "application/json", "stripe-signature": sig },
+    body: tampered,
+  }), env);
+  expect("a body swapped after signing is refused", r.status, 400);
+}
+
+// --- a payment nothing can be linked to ------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const ev = checkout(FRIEND, "evt_nolink");
+  delete ev.data.object.client_reference_id;
+  const r = await stripeHook(env, ev);
+  expect("a payment with no chat reference still returns 200", r.status, 200);
+  expect("but grants nothing", (await queued(env)).length, 0);
+  expect("and the owner is told it needs handling by hand",
+    sent.map((s) => s.body.chat_id), [String(OWNER)]);
+}
+
+// --- the double-grant trap -------------------------------------------------
+// A first payment raises BOTH checkout.session.completed and invoice.paid. If
+// both granted, one payment would buy two years.
+{
+  const env = harness({ approved: [] });
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  await stripeHook(env, {
+    id: "evt_first_invoice", type: "invoice.paid",
+    data: { object: { customer: "cus_1", billing_reason: "subscription_create" } },
+  });
+  expect("the first invoice of a new subscription grants nothing on its own",
+    (await queued(env)).length, 0);
+}
+{
+  // A renewal a year later. The chat is found through the customer id stored
+  // on the list at checkout.
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, stripe_customer_id: "cus_1" }],
+    pending: [], unsubscribed: [],
+  }));
+  await stripeHook(env, {
+    id: "evt_renewal", type: "invoice.paid",
+    data: { object: { customer: "cus_1", billing_reason: "subscription_cycle" } },
+  });
+  const q = await queued(env);
+  expect("a renewal invoice grants another year to the right chat",
+    q.map((i) => [i.verb, i.chat_id, i.years]), [["paid", FRIEND, 1]]);
+}
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  await stripeHook(env, {
+    id: "evt_unknown", type: "invoice.paid",
+    data: { object: { customer: "cus_nobody", billing_reason: "subscription_cycle" } },
+  });
+  expect("a renewal for a customer not on the list grants nothing",
+    (await queued(env)).length, 0);
+}
+
+// --- retries must not stack ------------------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  await stripeHook(env, checkout(FRIEND, "evt_same"));
+  await stripeHook(env, checkout(FRIEND, "evt_same"));
+  await stripeHook(env, checkout(FRIEND, "evt_same"));
+  expect("three deliveries of one event collapse onto a single queue entry",
+    (await queued(env)).length, 1);
+}
+
+// --- cancellation ----------------------------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, stripe_customer_id: "cus_1",
+                 paid_until: "2027-11-02" }],
+    pending: [], unsubscribed: [],
+  }));
+  await stripeHook(env, {
+    id: "evt_cancel", type: "customer.subscription.deleted",
+    data: { object: { customer: "cus_1" } },
+  });
+  const q = await queued(env);
+  expect("cancelling queues a cancellation, not a revocation",
+    q.map((i) => [i.verb, i.chat_id]), [["cancelled", FRIEND]]);
+  expect("and the subscriber is told they keep what they paid for",
+    sent.length === 1 && /until/.test(sent[0].body.text), true);
+}
+
+// --- events we do not act on -----------------------------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await stripeHook(env, {
+    id: "evt_fail", type: "invoice.payment_failed",
+    data: { object: { customer: "cus_1" } },
+  });
+  expect("a failed payment is acknowledged and left to Stripe's retries",
+    [r.status, (await queued(env)).length], [200, 0]);
+  const r2 = await stripeHook(env, {
+    id: "evt_other", type: "customer.created", data: { object: {} },
+  });
+  expect("an event with no handler is acknowledged, not errored",
+    [r2.status, (await queued(env)).length], [200, 0]);
+}
+
+// --- the endpoint must not answer anything else ----------------------------
+{
+  const env = harness();
+  env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  const r = await worker.fetch(new Request("https://w.test/stripe"), env);
+  expect("GET /stripe is not a route", r.status, 404);
 }
 
 console.log(`\n${failures} failure(s)`);
