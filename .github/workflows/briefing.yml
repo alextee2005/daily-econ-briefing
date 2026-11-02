@@ -98,6 +98,9 @@ jobs:
           # reason as the line above: this job runs every morning.
           python3 scripts/test_pick_edition.py
           python3 scripts/test_recall_message.py
+          # Who may receive an edition. Wrongly denying someone who paid is
+          # invisible until they complain, so it is checked every morning.
+          python3 scripts/test_entitlement.py
           # The Worker answers subscribers in real time and carries its own copy
           # of the wording; test_subscribers.py compares the two so they cannot
           # drift. Node is preinstalled on the runner.

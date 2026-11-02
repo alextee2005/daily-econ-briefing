@@ -38,8 +38,11 @@ an argument, so it cannot end up in a process list or a public run log.
 import argparse
 import json
 import os
+import sys
 from datetime import date
 from pathlib import Path
+
+import entitlement
 
 REPO = Path(__file__).resolve().parent.parent
 STORE = REPO / "subscribers.json"
@@ -538,19 +541,72 @@ def remove(targets: set, data: dict, remember: bool = False) -> list:
     return notes
 
 
-def recipients(data: dict, owner: int | None) -> list:
-    """Delivery list, owner first.
+def grandfather(data: dict, today, years: int = 1) -> list:
+    """Give every approved chat that has no entitlement yet a free year.
+
+    The one-off migration onto the paywall. Only touches entries with neither
+    paid_until nor trial_started, so it is idempotent: running it twice does
+    not extend anyone, and it cannot overwrite a real payment that has landed
+    in between.
+    """
+    notes = []
+    for e in sorted(data["approved"], key=lambda x: x["chat_id"]):
+        if e.get("paid_until") or e.get("trial_started"):
+            notes.append(f"…{str(e['chat_id'])[-3:]} already has access, left alone")
+            continue
+        entitlement.grant(e, today, "grandfathered", years)
+        notes.append(f"…{str(e['chat_id'])[-3:]} granted free access "
+                     f"to {e['paid_until']}")
+    return notes
+
+
+def recipients(data: dict, owner: int | None,
+               today=None, edition_dates=()) -> list:
+    """Delivery list, owner first, filtered by entitlement.
 
     The owner leads so that the send loop can upload the PDF once to a chat
     that is certain to exist, then forward the resulting file_id to everyone
     else. Ordering is also why a failed owner delivery is the one that fails
-    the job: if that send fails, nothing else can be attempted cheaply.
+    the job: if that send fails, nothing else can be attempted cheaply. The
+    owner is never subject to the paywall — they are the sender.
+
+    Approved chats are filtered through entitlement.entitled(). Being approved
+    now means "asked for it and was let in"; being entitled means "has paid,
+    is on trial, or is inside the grace window". Both are required.
+
+    `today` and `edition_dates` default to no filtering at all, so a caller
+    that has not been taught about entitlement yet keeps the old behaviour
+    rather than silently delivering to nobody. Only deliver.yml passes them,
+    and it is the only caller whose answer matters.
     """
     out = []
     if owner is not None:
         out.append(owner)
-    out += [e["chat_id"] for e in data["approved"] if e["chat_id"] != owner]
+
+    approved = [e for e in data["approved"] if e["chat_id"] != owner]
+    if today is None:
+        out += [e["chat_id"] for e in approved]
+        return out
+
+    out += [e["chat_id"] for e in approved
+            if entitlement.entitled(e, today, edition_dates)]
     return out
+
+
+def entitlement_report(data: dict, owner: int | None, today, edition_dates=()):
+    """Every approved chat with why it will or will not receive the edition.
+
+    Separate from recipients() because the delivery log needs to say what it
+    decided and why. A recipient count alone cannot distinguish "nobody has
+    paid" from "the paywall is broken", and those need opposite responses.
+    """
+    rows = []
+    for e in sorted(data["approved"], key=lambda x: x["chat_id"]):
+        if e["chat_id"] == owner:
+            continue
+        st = entitlement.status(e, today, edition_dates)
+        rows.append({"chat_id": e["chat_id"], "plan": e.get("plan") or "—", **st})
+    return rows
 
 
 def write_step_summary(diag: dict, data: dict, replies: list) -> None:
@@ -615,21 +671,70 @@ def parse_ids(raw: str) -> set:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("action",
-                    choices=["sync", "process", "drain", "approve", "remove", "recipients"])
+                    choices=["sync", "process", "drain", "approve", "remove",
+                             "recipients", "grandfather"])
     ap.add_argument("targets", nargs="?", default="", help="chat ids, comma or space separated")
     ap.add_argument("--updates", help="a getUpdates JSON payload (sync, process)")
     ap.add_argument("--replies", help="write the confirmations to send here (process)")
     ap.add_argument("--store", default=str(STORE))
+    ap.add_argument("--editions", default="",
+                    help="directory of edition PDFs; makes 'recipients' apply "
+                         "the paywall. Without it every approved chat is "
+                         "returned, as before the paywall existed.")
+    ap.add_argument("--today", default="", help="override today's date (testing)")
+    ap.add_argument("--report", default="",
+                    help="write the per-chat entitlement table here (recipients)")
     args = ap.parse_args()
 
     store = Path(args.store)
     data = load(store)
     owner = owner_id()
 
+    if args.action == "grandfather":
+        today = date.fromisoformat(args.today) if args.today else date.today()
+        notes = grandfather(data, today)
+        save(data, store)
+        print(f"Grandfathered onto the paywall, as of {today}:")
+        for n in notes:
+            print(f"  {n}")
+        return 0
+
     if args.action == "recipients":
+        # The paywall applies only when --editions says where the editions
+        # are. Omitting it is the old, unfiltered behaviour: a caller that has
+        # not been taught about entitlement keeps working rather than
+        # delivering to nobody, which is the failure that would go unnoticed.
+        today = date.fromisoformat(args.today) if args.today else date.today()
+        edition_dates = []
+        if args.editions:
+            import entitlement as _ent  # noqa: F401  (already imported; explicit here)
+            from pick_edition import edition_date
+            edition_dates = [d for f in sorted(Path(args.editions).glob("*.pdf"))
+                             if (d := edition_date(f))]
+
+        chosen = (recipients(data, owner, today, edition_dates) if args.editions
+                  else recipients(data, owner))
+
         # stdout is the machine-readable part: one id per line, nothing else.
-        for cid in recipients(data, owner):
+        for cid in chosen:
             print(cid)
+
+        # Everything explanatory goes to the report file or stderr, so that
+        # mapfile on stdout keeps seeing only ids.
+        if args.editions:
+            rows = entitlement_report(data, owner, today, edition_dates)
+            lines = ["| chat | plan | state | why |", "|---|---|---|---|"]
+            for r in rows:
+                shown = f"…{str(r['chat_id'])[-3:]}"
+                lines.append(f"| `{shown}` | {r['plan']} | "
+                             f"{'**' + r['state'] + '**' if r['entitled'] else r['state']} "
+                             f"| {r['detail']} |")
+            table = "\n".join(lines)
+            if args.report:
+                Path(args.report).write_text(table + "\n", encoding="utf-8")
+            n_ent = sum(1 for r in rows if r["entitled"])
+            print(f"{len(edition_dates)} edition(s) on disk; {n_ent} of "
+                  f"{len(rows)} subscriber(s) entitled", file=sys.stderr)
         return 0
 
     if args.action == "drain":
