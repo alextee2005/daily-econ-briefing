@@ -8,6 +8,8 @@
  */
 import worker from "./src/index.js";
 
+import { readFileSync } from "node:fs";
+
 const OWNER = 111;
 const FRIEND = 222;
 const STRANGER = 333;
@@ -22,6 +24,16 @@ const expect = (label, got, want) => {
     console.log(`      got  ${JSON.stringify(got)}`);
   }
 };
+
+
+/** The Worker's own wording for a key, so tests never re-type it. */
+function MSGOF(_env, key) {
+  const src = readFileSync(new URL("./src/index.js", import.meta.url), "utf8");
+  const block = src.split("const MSG = {")[1].split("\n};")[0];
+  const flat = block.replace(/"\s*\+\s*\n?\s*"/g, "");
+  const m = new RegExp(`"?${key}"?:\\s*\\n?\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(flat);
+  return m ? m[1] : null;
+}
 
 /** A KV namespace that behaves enough like Cloudflare's. */
 function kv() {
@@ -398,12 +410,13 @@ const queued = async (env) => {
     body.config,
     { BOT_TOKEN: true, OWNER_CHAT_ID: true, WEBHOOK_SECRET: true,
       DRAIN_SECRET: true, LIST_URL: true, QUEUE: true,
-      STRIPE_WEBHOOK_SECRET: false });
+      STRIPE_WEBHOOK_SECRET: false, PAY_URL: false, COMP_CODES: false });
   // The paywall arrived after the rest of this Worker. A health check that
   // reads "not ok" for months before anyone sets up Stripe is one people stop
   // reading, so an absent Stripe secret is reported and not counted against it.
-  expect("an unconfigured Stripe secret does not make health unhealthy",
-    [body.ok, body.unconfigured], [true, ["STRIPE_WEBHOOK_SECRET"]]);
+  expect("the paywall's own variables are reported without failing health",
+    [body.ok, body.unconfigured],
+    [true, ["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]]);
   expect("health never echoes a secret value",
     JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
   // A cached diagnostic reports a state that may be minutes old and is
@@ -675,6 +688,146 @@ const checkout = (chat, id = "evt_1") => ({
   env.STRIPE_WEBHOOK_SECRET = WHSEC;
   const r = await worker.fetch(new Request("https://w.test/stripe"), env);
   expect("GET /stripe is not a route", r.status, 404);
+}
+
+
+// ---------------------------------------------------------------------------
+// The paywall in the bot
+//
+// PAY_URL is the switch. The first group is the one that matters most: with
+// it unset, nothing below changes, so this can be merged and sit inert until
+// Stripe is actually ready.
+// ---------------------------------------------------------------------------
+
+const PAY = "https://buy.stripe.com/test_abc";
+
+{
+  const env = harness();                       // no PAY_URL
+  await hook(env, msg(FRIEND, "/start"));
+  expect("with the paywall off, /start still answers with the pending wording",
+    sent.map((s) => s.body.text).includes(MSGOF(env, "pending")) ||
+      /pending/i.test(sent[0].body.text), true);
+  expect("and still queues a plain start, not a trial",
+    (await queued(env)).map((i) => i.verb), ["start"]);
+}
+{
+  const env = harness();                       // no PAY_URL
+  await hook(env, msg(FRIEND, "/promo FRIENDS"));
+  expect("with the paywall off, /promo is ignored entirely",
+    [sent.length, (await queued(env)).length], [0, 0]);
+}
+
+// --- the trial -------------------------------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  await hook(env, msg(FRIEND, "/start"));
+  const q = await queued(env);
+  expect("with the paywall on, /start queues a trial", q.map((i) => i.verb), ["trial"]);
+  const toUser = sent.find((s) => s.body.chat_id === FRIEND);
+  expect("the subscriber is told the trial length and the price",
+    /free trial/.test(toUser.body.text) && /3 editions/.test(toUser.body.text) &&
+      /\$4\.99/.test(toUser.body.text), true);
+  expect("and the link carries their chat id, so the webhook can match it up",
+    toUser.body.text.includes(`client_reference_id=${FRIEND}`), true);
+  expect("the owner is told a trial started, with no approve buttons to press",
+    sent.some((s) => String(s.body.chat_id) === String(OWNER) &&
+      /Trial started/.test(s.body.text) && !s.body.reply_markup), true);
+}
+{
+  // Coming back after a trial must not mint a second one, and must not claim
+  // a number of editions the Worker cannot know.
+  const env = harness();
+  env.PAY_URL = PAY;
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, trial_started: "2026-01-01" }],
+    pending: [], unsubscribed: [],
+  }));
+  await hook(env, msg(FRIEND, "/start"));
+  expect("a chat that already trialled gets no second trial queued",
+    (await queued(env)).length, 0);
+  const t = sent.find((s) => s.body.chat_id === FRIEND).body.text;
+  expect("and is told they are already on the list, with the price",
+    /already on the list/.test(t) && /\$4\.99/.test(t), true);
+  expect("without claiming a number of editions left",
+    /\{n\}/.test(t) || /editions? to go/.test(t), false);
+}
+{
+  // The trial follows a chat through an opt-out. This is the /stop-then-
+  // /start loophole, checked from the talking end.
+  const env = harness();
+  env.PAY_URL = PAY;
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [], pending: [],
+    unsubscribed: [{ chat_id: FRIEND, trial_started: "2026-01-01" }],
+  }));
+  await hook(env, msg(FRIEND, "/start"));
+  expect("a chat that trialled, left, and came back gets no fresh trial",
+    (await queued(env)).length, 0);
+}
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, paid_until: "2027-11-02" }],
+    pending: [], unsubscribed: [],
+  }));
+  await hook(env, msg(FRIEND, "/start"));
+  expect("a paying subscriber is not sold anything",
+    [(await queued(env)).length,
+     /already subscribed/i.test(sent.find((s) => s.body.chat_id === FRIEND).body.text)],
+    [0, true]);
+}
+
+// --- comp codes ------------------------------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.COMP_CODES = "FRIENDS:1, PRESS:2";
+  await hook(env, msg(FRIEND, "/promo friends"));
+  const q = await queued(env);
+  expect("a valid comp code is accepted, case-insensitively",
+    q.map((i) => [i.verb, i.code, i.years]), [["comp", "FRIENDS", 1]]);
+  expect("and the redeemer is told, and the owner is told who redeemed it",
+    [sent.some((s) => s.body.chat_id === FRIEND && /accepted/i.test(s.body.text)),
+     sent.some((s) => String(s.body.chat_id) === String(OWNER) &&
+       /FRIENDS/.test(s.body.text))],
+    [true, true]);
+}
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.COMP_CODES = "FRIENDS:1, PRESS:2";
+  await hook(env, msg(FRIEND, "/promo PRESS"));
+  expect("a multi-year code grants what it says",
+    (await queued(env)).map((i) => i.years), [2]);
+}
+for (const bad of ["/promo NOPE", "/promo", "/promo FRIEND", "/promo  "]) {
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.COMP_CODES = "FRIENDS:1";
+  await hook(env, msg(FRIEND, bad));
+  expect(`"${bad.trim()}" grants nothing`, (await queued(env)).length, 0);
+}
+{
+  // No codes configured at all: every code must be refused, not accepted by
+  // an empty-string match.
+  const env = harness();
+  env.PAY_URL = PAY;
+  await hook(env, msg(FRIEND, "/promo ANYTHING"));
+  expect("with no COMP_CODES set, no code works", (await queued(env)).length, 0);
+  expect("and the refusal is explained rather than silent",
+    /not valid/i.test(sent[0].body.text), true);
+}
+
+// --- the pay link ----------------------------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = "https://buy.stripe.com/test_abc?utm=tg";
+  await hook(env, msg(STRANGER, "/start"));
+  const t = sent.find((s) => s.body.chat_id === STRANGER).body.text;
+  expect("a link that already has a query gets & rather than a second ?",
+    t.includes(`?utm=tg&client_reference_id=${STRANGER}`), true);
 }
 
 console.log(`\n${failures} failure(s)`);

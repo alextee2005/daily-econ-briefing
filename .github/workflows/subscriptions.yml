@@ -249,6 +249,55 @@ jobs:
           echo "Stored: $(cat /tmp/put.json)"
           echo "stored=yes" >> "$GITHUB_OUTPUT"
 
+      - name: Send renewal reminders and lapse notices
+        # After the store, never before: a notice marks the entry as already
+        # sent, and sending one whose marker was then lost would mean telling
+        # the same person their subscription has ended every five minutes.
+        #
+        # Non-fatal by design. These messages are a courtesy; the queue
+        # acknowledgement below is bookkeeping that must not be held hostage
+        # to them.
+        if: steps.store.outputs.stored == 'yes' || steps.fetch.outcome == 'success'
+        env:
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          PAY_URL: ${{ secrets.STRIPE_PAY_URL }}
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+        run: |
+          set -uo pipefail
+          if [ -z "${PAY_URL:-}" ]; then
+            echo "STRIPE_PAY_URL is not set, so the paywall is off and there is"
+            echo "nothing to remind anyone about."
+            exit 0
+          fi
+          if [ ! -f subscribers.json ]; then
+            echo "::warning::No local list this run; skipping notices."
+            exit 0
+          fi
+
+          python3 scripts/subscribers.py notices \
+            --editions editions --replies /tmp/notices.json || exit 0
+
+          N=$(python3 -c "import json; print(len(json.load(open('/tmp/notices.json'))))" \
+                2>/dev/null || echo 0)
+          if [ "$N" = "0" ]; then exit 0; fi
+
+          # Store the markers BEFORE sending. A send that happens without the
+          # marker landing repeats for ever; a marker that lands without the
+          # send costs one missed courtesy message. The second is the better
+          # failure.
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            -X PUT "${DRAIN_URL%/}/list?secret=${DRAIN_SECRET}" \
+            -H 'content-type: application/json' --data-binary @subscribers.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::warning::Could not record that notices were sent (HTTP ${CODE})."
+            echo "::warning::Nothing sent, so nothing repeats. Will retry next run."
+            exit 0
+          fi
+          bash scripts/send_replies.sh /tmp/notices.json
+
       - name: Acknowledge the queue
         # Strictly after a successful store. Acknowledging earlier would delete a
         # decision that never landed, which is how an opt-out disappears

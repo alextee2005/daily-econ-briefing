@@ -285,8 +285,13 @@ expect("/stop is answered with the unsubscribe wording",
 SPOKEN = subscribers.STATE_OUTCOMES | {"owner-stop"}
 expect("every outcome the code can produce has a message",
        sorted(o for o in SPOKEN if o not in MSG), [])
-expect("and the only extras are the ones the Worker sends on payment",
-       sorted(set(MSG) - SPOKEN), ["cancelled", "paid"])
+# Everything else is paywall wording, sent by the Worker in real time or by
+# the notices sweep. Grouped rather than listed one by one, but still an
+# exhaustive check: a key that belongs to neither set is a typo nobody sends.
+PAYWALL_MSG = {"paid", "cancelled", "trial", "signed-up", "pay", "lapsed",
+               "reminder", "comp-applied", "comp-bad"}
+expect("every message is either a spoken outcome or paywall wording",
+       sorted(set(MSG) - SPOKEN - PAYWALL_MSG), [])
 
 # Approval must notify, and must notify only on a real transition — the owner
 # re-running the workflow should not message a subscriber again each time.
@@ -739,6 +744,153 @@ expect("cancelling someone not on the list is reported, not an error",
 # whole point of not revoking, so it is checked end to end rather than implied.
 expect("a cancelled but unexpired subscriber still receives the briefing",
        subscribers.recipients(d_can, OWNER, PAY_TODAY, PAY_EDS), [OWNER, 777])
+
+# --- renewal reminders and lapse notices -----------------------------------
+# These run from the five-minute sweep, so "send once" cannot rest on the
+# schedule. Everything here is about not messaging the same person 288 times
+# a day.
+NOTE_TODAY = _date(2026, 11, 3)
+NOTE_EDS = ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]
+NOTE_DATA = subscribers.norm({"approved": [
+    {"chat_id": 1, "paid_until": "2026-11-08", "plan": "paid"},       # renews in 5d
+    {"chat_id": 2, "paid_until": "2026-11-08", "plan": "cancelled"},  # will not renew
+    {"chat_id": 3, "paid_until": "2026-01-01", "plan": "paid"},       # lapsed
+    {"chat_id": 4, "trial_started": "2026-01-01"},                    # trial spent
+    {"chat_id": 5, "paid_until": "2027-11-08", "plan": "paid"},       # far off
+    {"chat_id": 6, "paid_until": "2026-10-30", "plan": "paid"},       # in grace
+]})
+got = subscribers.notices(NOTE_DATA, NOTE_TODAY, NOTE_EDS, "https://pay.test/x")
+expect("only the right chats are messaged, and with the right message",
+       [(r["chat_id"], r["outcome"]) for r in got],
+       [(1, "reminder"), (3, "lapsed"), (4, "lapsed")])
+expect("a cancelled subscription is not told it renews automatically",
+       any(r["chat_id"] == 2 for r in got), False)
+expect("a subscriber still inside the grace window is not told they lapsed",
+       any(r["chat_id"] == 6 for r in got), False)
+expect("a renewal far in the future is left alone",
+       any(r["chat_id"] == 5 for r in got), False)
+expect("the reminder says how many days, not a placeholder",
+       "5 day(s)" in next(r for r in got if r["chat_id"] == 1)["text"], True)
+expect("the lapse notice carries the pay link",
+       "https://pay.test/x" in next(r for r in got if r["chat_id"] == 3)["text"], True)
+
+# The whole point: the next sweep, five minutes later, says nothing.
+expect("a second sweep sends nothing",
+       subscribers.notices(NOTE_DATA, NOTE_TODAY, NOTE_EDS, "https://pay.test/x"), [])
+expect("nor does a sweep the next day",
+       subscribers.notices(NOTE_DATA, _date(2026, 11, 4), NOTE_EDS, "x"), [])
+
+# A renewal moves paid_until, which must make the marker stale so that next
+# year's reminder is not suppressed by this year's.
+renewed = subscribers.norm({"approved": [
+    {"chat_id": 1, "paid_until": "2027-11-08", "plan": "paid",
+     "reminded_for": "2026-11-08"}]})
+expect("next year's reminder is not blocked by this year's marker",
+       [r["outcome"] for r in subscribers.notices(
+           renewed, _date(2027, 11, 3), NOTE_EDS, "x")],
+       ["reminder"])
+
+# Someone who lapsed, was told, then paid again and lapsed again later must be
+# told the second time too.
+again = subscribers.norm({"approved": [
+    {"chat_id": 1, "paid_until": "2026-06-01", "plan": "paid",
+     "lapsed_for": "2026-01-01"}]})
+expect("a second, later lapse is announced rather than swallowed",
+       [r["outcome"] for r in subscribers.notices(again, NOTE_TODAY, NOTE_EDS, "x")],
+       ["lapsed"])
+
+# With no link configured the messages still go, just without a URL. Better a
+# message with a missing link than silence about access having stopped.
+nolink = subscribers.norm({"approved": [
+    {"chat_id": 1, "paid_until": "2026-01-01", "plan": "paid"}]})
+out = subscribers.notices(nolink, NOTE_TODAY, NOTE_EDS, "")
+expect("a missing pay link does not stop the lapse notice",
+       [r["outcome"] for r in out], ["lapsed"])
+expect("and leaves no raw placeholder in the text",
+       "{link}" in out[0]["text"], False)
+
+# --- opting out must not erase what someone paid for -----------------------
+# This was a real bug: the stop handler built a fresh unsubscribed entry, so
+# /stop forgot trial_started (three more free editions on the next /start,
+# repeatable for ever) and forgot paid_until and the Stripe ids with it.
+d_pay = fresh()
+d_pay["approved"].append({"chat_id": 888, "type": "private",
+                          "paid_until": "2027-11-02", "plan": "paid",
+                          "stripe_customer_id": "cus_x",
+                          "trial_started": "2026-01-15"})
+d_pay, _ = apply_queue([{"id": "s", "verb": "stop", "chat_id": 888,
+                         "type": "private"}], d_pay, OWNER)
+left = next(e for e in d_pay["unsubscribed"] if e["chat_id"] == 888)
+expect("opting out keeps what the subscriber had paid for",
+       (left.get("paid_until"), left.get("plan"), left.get("stripe_customer_id"),
+        left.get("trial_started"), bool(left.get("stopped"))),
+       ("2027-11-02", "paid", "cus_x", "2026-01-15", True))
+expect("and they are no longer a recipient while opted out",
+       subscribers.recipients(d_pay, OWNER, PAY_TODAY, PAY_EDS), [OWNER])
+
+# --- trials and comps arriving through the queue ---------------------------
+TRIAL = {"id": "t1", "verb": "trial", "chat_id": 888, "type": "private"}
+
+d, _ = apply_queue([TRIAL], fresh(), OWNER)
+e = d["approved"][0]
+expect("a trial enrols straight away rather than waiting on approval",
+       ([x["chat_id"] for x in d["approved"]], [x["chat_id"] for x in d["pending"]]),
+       ([888], []))
+expect("and records when it started, with the trial plan",
+       (bool(e["trial_started"]), e["plan"]), (True, "trial"))
+
+# Backdated deliberately. A trial started today is indistinguishable from a
+# fresh one, so the resume cases below would pass even if the date were being
+# silently reset — which is exactly the bug they exist to catch.
+started = "2026-01-15"
+d["approved"][0]["trial_started"] = started
+d, _ = apply_queue([TRIAL], d, OWNER)
+expect("a second /start does not restart the trial",
+       d["approved"][0]["trial_started"], started)
+
+# The loophole, from the storage end: trial_started must survive an opt-out,
+# or /stop then /start hands out three more editions for ever.
+d_out, _ = apply_queue([{"id": "s", "verb": "stop", "chat_id": 888,
+                         "type": "private"}], d, OWNER)
+kept = next(x for x in d_out["unsubscribed"] if x["chat_id"] == 888)
+expect("opting out keeps the trial start date", kept.get("trial_started"), started)
+d_back, _ = apply_queue([TRIAL], d_out, OWNER)
+expect("so coming back resumes the old trial rather than minting a new one",
+       d_back["approved"][0]["trial_started"], started)
+
+# A payer must never be demoted to a trial by a stray /start.
+d_paid = fresh()
+d_paid["approved"].append({"chat_id": 888, "paid_until": "2027-11-02", "plan": "paid"})
+d_paid, _ = apply_queue([TRIAL], d_paid, OWNER)
+expect("a paying subscriber is not given a trial",
+       (d_paid["approved"][0]["plan"], d_paid["approved"][0]["paid_until"]),
+       ("paid", "2027-11-02"))
+
+# --- comps -----------------------------------------------------------------
+COMP = {"id": "c1", "verb": "comp", "chat_id": 888, "type": "private",
+        "code": "FRIENDS", "years": 1}
+d_c, _ = apply_queue([COMP], fresh(), OWNER)
+e = d_c["approved"][0]
+expect("a comp code enrols and grants a year",
+       (e["plan"], bool(e["paid_until"])), ("comp", True))
+until = e["paid_until"]
+d_c, _ = apply_queue([COMP], d_c, OWNER)
+expect("redeeming the same code twice does not stack",
+       d_c["approved"][0]["paid_until"], until)
+d_c, _ = apply_queue([{**COMP, "id": "c2", "code": "PRESS", "years": 2}], d_c, OWNER)
+expect("a different code does extend", d_c["approved"][0]["paid_until"] > until, True)
+
+d_own, _ = apply_queue([{**COMP, "chat_id": OWNER}], fresh(), OWNER)
+expect("a comp attributed to the owner is skipped", len(d_own["approved"]), 0)
+
+# A comp redeemed by someone mid-trial should upgrade them, and a trial that
+# is already spent must not drag them back down.
+d_up = fresh()
+d_up["approved"].append({"chat_id": 888, "trial_started": "2026-01-01",
+                         "plan": "trial"})
+d_up, _ = apply_queue([COMP], d_up, OWNER)
+expect("a comp upgrades a chat whose trial was already spent",
+       subscribers.recipients(d_up, OWNER, PAY_TODAY, PAY_EDS), [OWNER, 888])
 
 # --- the one-off migration onto the paywall --------------------------------
 # Getting this wrong in the generous direction costs nothing; getting it wrong
