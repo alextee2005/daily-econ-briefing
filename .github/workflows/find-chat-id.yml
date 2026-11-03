@@ -87,6 +87,80 @@ jobs:
           pathlib.Path('subscribers.json').write_text(json.dumps(lst, indent=2) + "\n")
           PY
 
+      - name: Look for chats that have messaged the bot
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Never fatal. This step only DISCOVERS chats; everything that
+          # actually changes the list happens in the steps after it, and a
+          # failure here used to abort the job before "Store the updated
+          # list" ran — which silently discarded an approval or a
+          # grandfathering that had already been applied, while the summary
+          # (reading the local file) still showed it as done.
+          set -uo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN is not set, so no discovery."
+            exit 0
+          fi
+
+          # getUpdates and a webhook are mutually exclusive: Telegram refuses
+          # getUpdates outright while a webhook is pointed. Under the webhook
+          # this step has nothing to do anyway — the Worker records every
+          # /start into its queue and subscriptions.yml drains it — so check
+          # first rather than calling a method that cannot work.
+          curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+            "https://api.telegram.org/bot${TOKEN}/getWebhookInfo" -o /tmp/wh.json || true
+          MODE=$(python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open('/tmp/wh.json'))
+              print("webhook" if (d.get('result') or {}).get('url') else "polling")
+          except Exception:
+              print("unknown")
+          PY
+          )
+
+          if [ "$MODE" = "webhook" ]; then
+            echo "A webhook is pointed, so getUpdates is unavailable and unnecessary."
+            echo "New chats reach the list through the Worker's queue, drained by"
+            echo "the 'Answer the Telegram bot' workflow. Nothing to discover here."
+            exit 0
+          fi
+
+          curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+            "https://api.telegram.org/bot${TOKEN}/getUpdates" -o /tmp/upd.json || true
+
+          # Check Telegram accepted the call before trusting the payload, and
+          # print only its description — never the raw body, which echoes back
+          # chat metadata and message text into a public log.
+          python3 - <<'PY' || exit 0
+          import json, sys
+          try:
+              d = json.load(open('/tmp/upd.json'))
+          except Exception as exc:
+              print(f"::warning::getUpdates returned nothing readable: {exc}")
+              sys.exit(1)
+          if not d.get('ok'):
+              why = d.get('description', '?')
+              print('::warning::Telegram rejected getUpdates:', why)
+              if 'webhook' in why.lower():
+                  print('A webhook is active. Discovery is not available in that mode,')
+                  print('and is not needed — see the note above.')
+              else:
+                  print('Check that TELEGRAM_BOT_TOKEN is still valid.')
+              sys.exit(1)
+          if not d.get('result'):
+              print('No updates returned. Send the bot a message (e.g. /start),')
+              print('then re-run this workflow. getUpdates only keeps 24 hours.')
+          PY
+
+          if [ -s /tmp/upd.json ]; then
+            python3 scripts/subscribers.py sync --updates /tmp/upd.json || \
+              echo "::warning::sync failed; the steps below still run."
+          fi
+
       - name: Apply approvals and removals
         if: inputs.approve != '' || inputs.remove != ''
         env:
@@ -126,39 +200,8 @@ jobs:
             echo "deliberately not printed — these logs are public."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Look for chats that have messaged the bot
-        env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${TOKEN:-}" ]; then
-            echo "::error::TELEGRAM_BOT_TOKEN secret is not set. Add it first."
-            exit 1
-          fi
-
-          curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
-            "https://api.telegram.org/bot${TOKEN}/getUpdates" -o /tmp/upd.json
-
-          # Check Telegram accepted the call before trusting the payload, and
-          # print only its description — never the raw body, which echoes back
-          # chat metadata and message text into a public log.
-          python3 - <<'PY'
-          import json, sys
-          d = json.load(open('/tmp/upd.json'))
-          if not d.get('ok'):
-              print('::error::Telegram rejected the request:', d.get('description', '?'))
-              print('The bot token is probably wrong or has been revoked.')
-              sys.exit(1)
-          if not d.get('result'):
-              print('No updates returned. Send the bot a message (e.g. /start),')
-              print('then re-run this workflow. getUpdates only keeps 24 hours.')
-          PY
-
-          python3 scripts/subscribers.py sync --updates /tmp/upd.json
-
       - name: Store the updated list
+        id: store
         env:
           DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
           DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
@@ -174,11 +217,13 @@ jobs:
             exit 1
           fi
           echo "Stored: $(cat /tmp/put.json)"
+          echo "stored=yes" >> "$GITHUB_OUTPUT"
 
       - name: Show the current delivery list
         if: always()
         env:
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STORED: ${{ steps.store.outputs.stored }}
         run: |
           set -uo pipefail
 
@@ -198,6 +243,11 @@ jobs:
               return f"| {label} | {n} | {who} |"
 
           print("## Briefing delivery list\n")
+          if os.environ.get("STORED") != "yes":
+              print("> **Not saved.** This table is the list as this run computed "
+                    "it locally; storing it to the Worker did not complete, so "
+                    "nothing above has actually changed. Re-run once the cause "
+                    "is fixed.\n")
           print(f"**{1 if owner else 0} owner + {len(d.get('approved') or [])} "
                 "subscriber(s)** will receive the next edition.\n")
           print("| list | count | chats |")
