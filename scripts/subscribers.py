@@ -76,7 +76,46 @@ MSG = {
              "from today, and the next briefing is on its way."),
     "cancelled": ("Your subscription will not renew. You keep receiving the "
                   "briefing until the year you have paid for runs out."),
+
+    # --- the paywall -------------------------------------------------------
+    # These carry {placeholders}, filled by fill() here and by the same
+    # substitution in the Worker. The drift test compares the RAW templates,
+    # so the two sides cannot diverge even though each fills them its own way.
+    "trial": ("You are on a free trial — the next {n} editions are yours, "
+              "starting with the next one. After that it is $4.99 for a year: "
+              "{link}"),
+    # Deliberately says nothing about how many trial editions are left. Only
+    # the delivery side can count those (they are counted out of git), and the
+    # Worker answers before any of that is in reach. Saying "you are already
+    # on the list" is true whether the trial is running or spent, and the
+    # notices sweep tells them precisely when it does run out.
+    "signed-up": ("You are already on the list. A year of the briefing is "
+                  "$4.99 whenever you want it: {link}"),
+    "pay": ("Your free editions are used up. A year of the briefing is $4.99: "
+            "{link}"),
+    "lapsed": ("Your subscription has ended, so the briefing has stopped. A "
+               "year is $4.99 whenever you want it back: {link}"),
+    "reminder": ("Your subscription renews in {n} day(s) at $4.99. It renews "
+                 "automatically — nothing to do. Send /stop if you would "
+                 "rather it did not."),
+    "comp-applied": ("Code accepted — you are subscribed for a year. "
+                     "Thank you."),
+    "comp-bad": ("That code is not valid. If you think it should be, reply and "
+                 "the owner will take a look."),
 }
+
+
+def fill(outcome: str, **kw) -> str:
+    """A message with its placeholders filled.
+
+    Unknown placeholders are left as they are rather than raising: a missing
+    link is a cosmetic flaw in one message, and an exception here would stop
+    the whole sweep sending anything to anybody.
+    """
+    text = MSG[outcome]
+    for key, value in kw.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
 
 # What the owner can do from the chat itself, so approving does not mean opening
 # GitHub on a phone. Honoured only from the owner's own chat — see
@@ -294,7 +333,8 @@ def apply_queue(items: list, data: dict, owner: int | None) -> tuple[dict, list]
         verb, cid = item.get("verb"), item.get("chat_id")
         ctype = item.get("type", "?")
         if not isinstance(cid, int) or verb not in (
-                "start", "stop", "approve", "deny", "paid", "cancelled"):
+                "start", "stop", "approve", "deny", "paid", "cancelled",
+                "trial", "comp"):
             notes.append(f"{item.get('id', '?')}: ignored, not a decision I understand")
             continue
 
@@ -317,11 +357,84 @@ def apply_queue(items: list, data: dict, owner: int | None) -> tuple[dict, list]
 
         elif verb in ("stop", "deny"):
             was = cid in ids(data["approved"]) | ids(data["pending"])
+            # Carry the entry over rather than minting a bare one. It used to
+            # build {chat_id, type, stopped} from scratch, which threw away
+            # trial_started — so /stop then /start handed out another three
+            # free editions, every time, for ever — and threw away paid_until
+            # and the Stripe ids with it, so someone who had paid and opted
+            # out came back looking like they never had.
+            prior = next((e for e in data["approved"] + data["pending"]
+                          if e["chat_id"] == cid), None)
             remove({cid}, data)
             if cid not in ids(data["unsubscribed"]):
-                data["unsubscribed"].append({"chat_id": cid, "type": ctype,
-                                             "stopped": date.today().isoformat()})
+                gone = dict(prior) if prior else {"chat_id": cid, "type": ctype}
+                gone["stopped"] = date.today().isoformat()
+                data["unsubscribed"].append(gone)
             notes.append(f"{cid}: {'removed and' if was else ''} opted out".replace("  ", " "))
+
+        elif verb == "trial":
+            # A /start under the paywall. Unlike "start", this enrols them
+            # straight away: the trial IS the access, so leaving them pending
+            # on an owner's approval would mean the three free editions never
+            # arrive.
+            #
+            # trial_started is written once and never rewritten, which is the
+            # whole defence against /stop then /start minting a second trial.
+            # It is also why an already-trialled chat coming back is a no-op
+            # here rather than a fresh grant.
+            entry = next((e for e in data["approved"] if e["chat_id"] == cid), None)
+            if entry is not None and entry.get("trial_started"):
+                notes.append(f"{cid}: already had a trial, left as it was")
+                continue
+            if entry is not None and entry.get("paid_until"):
+                notes.append(f"{cid}: already has paid access, no trial given")
+                continue
+
+            prior = next((e for e in data["pending"] + data["unsubscribed"]
+                          if e["chat_id"] == cid), None)
+            if prior is not None and prior.get("trial_started"):
+                # They trialled, left, and are back. The spent trial follows
+                # them rather than being forgotten on the way out.
+                started = prior["trial_started"]
+            else:
+                started = date.today().isoformat()
+
+            data["pending"] = [e for e in data["pending"] if e["chat_id"] != cid]
+            data["unsubscribed"] = [e for e in data["unsubscribed"]
+                                    if e["chat_id"] != cid]
+            if entry is None:
+                entry = {"chat_id": cid, "type": ctype,
+                         "added": date.today().isoformat()}
+                data["approved"].append(entry)
+            entry["trial_started"] = started
+            entry.setdefault("plan", "trial")
+            notes.append(f"{cid}: trial from {started}")
+
+        elif verb == "comp":
+            # A free code redeemed in the bot. Discounts go through Stripe;
+            # only 100%-free comps come this way, so there is no money to
+            # reconcile and nothing to verify beyond the code itself, which
+            # the Worker has already checked.
+            code = item.get("code", "?")
+            years = item.get("years", 1)
+            entry = next((e for e in data["approved"] if e["chat_id"] == cid), None)
+            if entry is not None and entry.get("last_comp_code") == code:
+                notes.append(f"{cid}: comp {code} already applied, no change")
+                continue
+            if entry is None:
+                prior = next((e for e in data["pending"] + data["unsubscribed"]
+                              if e["chat_id"] == cid), None)
+                entry = dict(prior) if prior else {"chat_id": cid, "type": ctype}
+                entry.pop("stopped", None)
+                entry.pop("seen", None)
+                entry.setdefault("added", date.today().isoformat())
+                data["pending"] = [e for e in data["pending"] if e["chat_id"] != cid]
+                data["unsubscribed"] = [e for e in data["unsubscribed"]
+                                        if e["chat_id"] != cid]
+                data["approved"].append(entry)
+            entitlement.grant(entry, date.today(), "comp", years)
+            entry["last_comp_code"] = code
+            notes.append(f"{cid}: comp {code}, access through {entry['paid_until']}")
 
         elif verb == "paid":
             # Payment auto-approves, by decision: someone who has just paid
@@ -609,6 +722,49 @@ def remove(targets: set, data: dict, remember: bool = False) -> list:
     return notes
 
 
+def notices(data: dict, today, edition_dates=(), link: str = "") -> list:
+    """Messages owed to subscribers about their own access.
+
+    Two kinds, and each is sent exactly once:
+
+      reminder  a renewal falls inside the next REMIND_DAYS
+      lapsed    access has run out, grace included, so delivery has stopped
+
+    Called from the five-minute sweep, which means "exactly once" cannot rest
+    on the schedule — it would otherwise send every five minutes for a week.
+    So the entry records which expiry it has already spoken about:
+    reminded_for and lapsed_for hold the paid_until (or the trial start) the
+    message was about. A renewal moves paid_until, which makes the marker
+    stale and lets next year's reminder through on its own.
+
+    Mutates `data` and returns reply dicts for send_replies.sh.
+    """
+    out = []
+    for e in sorted(data["approved"], key=lambda x: x["chat_id"]):
+        st = entitlement.status(e, today, edition_dates)
+
+        if st["state"] == "lapsed":
+            about = e.get("paid_until") or e.get("trial_started") or "?"
+            if e.get("lapsed_for") != about:
+                e["lapsed_for"] = about
+                out.append({"chat_id": e["chat_id"], "outcome": "lapsed",
+                            "text": fill("lapsed", link=link)})
+            continue
+
+        # Only a real renewal gets a reminder. A trial has nothing to renew,
+        # and a cancelled subscription is not going to renew either — telling
+        # someone who has already cancelled that it renews automatically
+        # would be straightforwardly false.
+        if entitlement.expiring(e, today) and e.get("plan") != "cancelled":
+            about = e["paid_until"]
+            if e.get("reminded_for") != about:
+                e["reminded_for"] = about
+                days = (entitlement.as_date(about) - today).days
+                out.append({"chat_id": e["chat_id"], "outcome": "reminder",
+                            "text": fill("reminder", n=days)})
+    return out
+
+
 def grandfather(data: dict, today, years: int = 1) -> list:
     """Give every approved chat that has no entitlement yet a free year.
 
@@ -740,7 +896,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("action",
                     choices=["sync", "process", "drain", "approve", "remove",
-                             "recipients", "grandfather"])
+                             "recipients", "grandfather", "notices"])
     ap.add_argument("targets", nargs="?", default="", help="chat ids, comma or space separated")
     ap.add_argument("--updates", help="a getUpdates JSON payload (sync, process)")
     ap.add_argument("--replies", help="write the confirmations to send here (process)")
@@ -757,6 +913,25 @@ def main() -> int:
     store = Path(args.store)
     data = load(store)
     owner = owner_id()
+
+    if args.action == "notices":
+        today = date.fromisoformat(args.today) if args.today else date.today()
+        edition_dates = []
+        if args.editions:
+            from pick_edition import edition_date
+            edition_dates = [d for f in sorted(Path(args.editions).glob("*.pdf"))
+                             if (d := edition_date(f))]
+        link = (os.environ.get("PAY_URL") or "").strip()
+        replies = notices(data, today, edition_dates, link)
+        save(data, store)
+        if args.replies:
+            Path(args.replies).write_text(json.dumps(replies), encoding="utf-8")
+        kinds = {}
+        for r in replies:
+            kinds[r["outcome"]] = kinds.get(r["outcome"], 0) + 1
+        print(f"{len(replies)} notice(s) to send"
+              + (f": {kinds}" if kinds else ""))
+        return 0
 
     if args.action == "grandfather":
         today = date.fromisoformat(args.today) if args.today else date.today()

@@ -44,7 +44,7 @@ TRIAL_EDITIONS = 3
 REMIND_DAYS = 7
 
 
-def _as_date(value):
+def as_date(value):
     """An ISO date, or None for anything unparseable.
 
     Deliberately forgiving: a hand-edited list with a malformed date must not
@@ -65,10 +65,10 @@ def editions_since(start, edition_dates) -> int:
     Strictly after, because the edition published the same day someone sends
     /start has already gone out by the time they are on the list.
     """
-    start = _as_date(start)
+    start = as_date(start)
     if start is None:
         return 0
-    return sum(1 for d in edition_dates if _as_date(d) and _as_date(d) > start)
+    return sum(1 for d in edition_dates if as_date(d) and as_date(d) > start)
 
 
 def status(entry: dict, today: date, edition_dates=()) -> dict:
@@ -82,8 +82,8 @@ def status(entry: dict, today: date, edition_dates=()) -> dict:
         lapsed      was paid or on trial, and that has run out
         none        nothing has ever granted this chat anything
     """
-    paid_until = _as_date(entry.get("paid_until"))
-    trial_started = _as_date(entry.get("trial_started"))
+    paid_until = as_date(entry.get("paid_until"))
+    trial_started = as_date(entry.get("trial_started"))
 
     if paid_until is not None:
         if today <= paid_until:
@@ -114,7 +114,7 @@ def entitled(entry: dict, today: date, edition_dates=()) -> bool:
 
 def expiring(entry: dict, today: date) -> bool:
     """Is a renewal due within REMIND_DAYS? False once it has already passed."""
-    paid_until = _as_date(entry.get("paid_until"))
+    paid_until = as_date(entry.get("paid_until"))
     if paid_until is None:
         return False
     days = (paid_until - today).days
@@ -128,7 +128,7 @@ def grant(entry: dict, today: date, plan: str, years: int = 1) -> dict:
     renewal that lands early does not shorten what was already paid for and a
     renewal that lands late does not silently backdate.
     """
-    current = _as_date(entry.get("paid_until"))
+    current = as_date(entry.get("paid_until"))
     base = current if current and current > today else today
     entry["paid_until"] = (base + timedelta(days=365 * years)).isoformat()
     entry["plan"] = plan

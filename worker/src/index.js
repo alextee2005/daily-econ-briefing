@@ -51,6 +51,32 @@ const MSG = {
   cancelled:
     "Your subscription will not renew. You keep receiving the briefing until " +
     "the year you have paid for runs out.",
+
+
+  // The paywall. Templates; {n} and {link} are filled at send time, and
+  // the same raw strings live in scripts/subscribers.py — test_subscribers.py
+  // compares them so the two copies cannot drift.
+  trial:
+    "You are on a free trial — the next {n} editions are yours, " +
+    "starting with the next one. After that it is $4.99 for a year: " +
+    "{link}",
+  "signed-up":
+    "You are already on the list. A year of the briefing is $4.99 " +
+    "whenever you want it: {link}",
+  pay:
+    "Your free editions are used up. A year of the briefing is " +
+    "$4.99: {link}",
+  lapsed:
+    "Your subscription has ended, so the briefing has stopped. A " +
+    "year is $4.99 whenever you want it back: {link}",
+  reminder:
+    "Your subscription renews in {n} day(s) at $4.99. It renews " +
+    "automatically — nothing to do. Send /stop if you would rather " +
+    "it did not.",
+  "comp-applied": "Code accepted — you are subscribed for a year. Thank you.",
+  "comp-bad":
+    "That code is not valid. If you think it should be, reply and " +
+    "the owner will take a look.",
 };
 
 const START = new Set(["/start", "/subscribe"]);
@@ -60,7 +86,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-02a";
+const VERSION = "2026-11-03a";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -341,6 +367,88 @@ const decisionKeyboard = (chat_id) => ({
   },
 });
 
+// --- the paywall ------------------------------------------------------------
+//
+// PAY_URL is the switch. Until it is set, /start behaves exactly as it did
+// before the paywall existed: the chat lands in pending and waits on the
+// owner. That is deliberate — this code can ship and sit inert until Stripe
+// is actually ready, rather than being held back in a branch.
+const TRIAL_EDITIONS = 3;
+
+function paywallOn(env) {
+  return Boolean(env.PAY_URL);
+}
+
+/** The Payment Link with this chat attached, so the webhook can match it up. */
+function payLink(env, chatId) {
+  const base = String(env.PAY_URL || "");
+  if (!base) return "";
+  return base + (base.includes("?") ? "&" : "?") +
+    "client_reference_id=" + encodeURIComponent(String(chatId));
+}
+
+function fill(key, vars) {
+  let text = MSG[key];
+  for (const [k, v] of Object.entries(vars || {})) {
+    text = text.split("{" + k + "}").join(String(v));
+  }
+  return text;
+}
+
+/**
+ * Free comp codes, from the COMP_CODES variable: "FRIENDS:1, PRESS:2".
+ *
+ * Deliberately has no redemption limits and no expiry. Those need race-safe
+ * counting, which KV cannot give without transactions, and a limit that
+ * quietly miscounts is worse than no limit at all. Discounts and anything
+ * needing a cap go through Stripe's own promotion codes, which already solve
+ * this properly; only 100%-free comps come through the bot.
+ */
+function compYears(env, code) {
+  const want = String(code || "").trim().toUpperCase();
+  if (!want) return 0;
+  for (const pair of String(env.COMP_CODES || "").split(",")) {
+    const [name, years] = pair.split(":").map((x) => (x || "").trim());
+    if (name && name.toUpperCase() === want) {
+      const n = parseInt(years || "1", 10);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    }
+  }
+  return 0;
+}
+
+/** What to say to a /start, and what to queue, once the paywall is on. */
+async function paywallStart(env, id, chatType, seq) {
+  const { list } = await storedList(env);
+  const all = [
+    ...((list && list.approved) || []),
+    ...((list && list.pending) || []),
+    ...((list && list.unsubscribed) || []),
+  ];
+  const entry = all.find((e) => e.chat_id === id) || null;
+
+  if (entry && entry.paid_until) {
+    // Already paying. Nothing to sell them and nothing to queue.
+    return void (await say(env, id, MSG["already-subscribed"]));
+  }
+
+  if (entry && entry.trial_started) {
+    // They have had a trial already. Whether it still has editions left is
+    // not knowable here — that is counted out of git on the delivery side —
+    // so this says the one thing true either way. The notices sweep is what
+    // tells them the moment it actually runs out.
+    //
+    // Reaching this branch at all is what closes the /stop-then-/start
+    // loophole: trial_started follows the chat through an opt-out, so coming
+    // back does not look like a new arrival.
+    await say(env, id, fill("signed-up", { link: payLink(env, id) }));
+    return;
+  }
+
+  await say(env, id, fill("trial", { n: TRIAL_EDITIONS, link: payLink(env, id) }));
+  await enqueue(env, { verb: "trial", chat_id: id, type: chatType }, seq);
+}
+
 async function onMessage(env, msg, seq) {
   const chat = msg.chat || {};
   const id = chat.id;
@@ -386,7 +494,32 @@ async function onMessage(env, msg, seq) {
   }
 
   // --- everyone else --------------------------------------------------------
+  if (verb === "/promo") {
+    if (!paywallOn(env)) return;
+    const code = text.split(/\s+/)[1] || "";
+    const years = compYears(env, code);
+    if (!years) return void say(env, id, MSG["comp-bad"]);
+    await say(env, id, MSG["comp-applied"]);
+    await enqueue(env, {
+      verb: "comp", chat_id: id, type: chat.type || "?",
+      code: code.trim().toUpperCase(), years,
+    }, seq);
+    await notifyOwner(env, `Comp code ${code.trim().toUpperCase()} redeemed by chat ${id}.`);
+    return;
+  }
+
   if (START.has(verb)) {
+    if (paywallOn(env)) {
+      await paywallStart(env, id, chat.type || "?", seq);
+      if (env.OWNER_CHAT_ID && !isOwner(env, id)) {
+        const who = [chat.title, chat.first_name, chat.last_name]
+          .filter(Boolean).join(" ");
+        const tag = chat.username ? ` (@${chat.username})` : "";
+        await say(env, env.OWNER_CHAT_ID,
+          `Trial started\n${who || "?"}${tag}\nchat ${id} (${chat.type || "?"})`);
+      }
+      return;
+    }
     const list = await currentList(env);
     if (list && list.approved.has(id)) {
       return void say(env, id, MSG["already-subscribed"]);
@@ -484,7 +617,7 @@ export default {
       const config = {};
       for (const name of ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
                           "DRAIN_SECRET", "LIST_URL", "QUEUE",
-                          "STRIPE_WEBHOOK_SECRET"]) {
+                          "STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]) {
         config[name] = Boolean(env[name]);
       }
       // STRIPE_WEBHOOK_SECRET is reported but does not count as missing. The
@@ -492,7 +625,11 @@ export default {
       // check that reads "not ok" for months before anyone sets up Stripe is a
       // health check people learn to ignore. /stripe refuses clearly on its own
       // when the secret is absent, which is where that failure belongs.
-      const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET"]);
+      // PAY_URL is the paywall's switch and COMP_CODES is empty until there
+      // are codes, so neither absence is a fault. /health still reports both,
+      // because "is the paywall actually on?" is otherwise unanswerable from
+      // outside.
+      const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]);
       const missing = Object.entries(config)
         .filter(([k, v]) => !v && !OPTIONAL.has(k)).map(([k]) => k);
       const unconfigured = Object.entries(config)
