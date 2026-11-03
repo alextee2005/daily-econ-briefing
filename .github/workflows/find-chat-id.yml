@@ -36,6 +36,10 @@ on:
         description: "Chat IDs to stop sending to, or to discard from pending"
         required: false
         default: ""
+      grandfather:
+        description: "ONE-OFF: give every existing approved chat a free year on the paywall"
+        type: boolean
+        default: false
 
 permissions:
   contents: read # the list lives in the Worker's KV, not here
@@ -103,6 +107,24 @@ jobs:
             # the file, so re-approving someone does not message them again.
             bash scripts/send_replies.sh /tmp/approved.json
           fi
+
+      - name: Grandfather existing subscribers onto the paywall
+        if: inputs.grandfather
+        run: |
+          set -euo pipefail
+          # Idempotent: only chats with neither paid_until nor trial_started
+          # are touched, so running this twice extends nobody and cannot
+          # overwrite a payment that landed in between. Must be run BEFORE
+          # delivery starts enforcing entitlement, or the existing
+          # subscribers would be cut off on the next edition.
+          python3 scripts/subscribers.py grandfather
+          {
+            echo "## Grandfathered onto the paywall"
+            echo
+            echo "Every approved chat that had no entitlement now has a free"
+            echo "year. Counts and masked ids are in the log; full ids are"
+            echo "deliberately not printed — these logs are public."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Look for chats that have messaged the bot
         env:

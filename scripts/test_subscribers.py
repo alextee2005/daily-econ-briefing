@@ -278,8 +278,15 @@ expect("approval is answered with the approved wording",
 expect("/stop is answered with the unsubscribe wording",
        MSG["stopped"],
        "We have received your unsubscribe request. Please give us time to process it.")
+# Asserted as "nothing is missing" rather than as an exact key set, because
+# MSG also carries wording the Worker sends directly and Python never does.
+# An exact set would have to be edited for each of those, which turns a real
+# guard into a chore and eventually into a rubber stamp.
+SPOKEN = subscribers.STATE_OUTCOMES | {"owner-stop"}
 expect("every outcome the code can produce has a message",
-       sorted(MSG), ["already-subscribed", "approved", "owner-stop", "pending", "stopped"])
+       sorted(o for o in SPOKEN if o not in MSG), [])
+expect("and the only extras are the ones the Worker sends on payment",
+       sorted(set(MSG) - SPOKEN), ["cancelled", "paid"])
 
 # Approval must notify, and must notify only on a real transition — the owner
 # re-running the workflow should not message a subscriber again each time.
@@ -606,6 +613,172 @@ if WORKER.is_file():
            sorted(extra), [])
 else:
     print("SKIP  worker/src/index.js not present")
+
+# --- the paywall filter in recipients() ------------------------------------
+# These are the cases where a bug stops delivering to somebody who paid, so
+# they are about the filter being exactly as strict as intended and no more.
+from datetime import date as _date  # noqa: E402
+
+PAY_TODAY = _date(2026, 11, 2)
+# Six editions, so a trial opened in January is genuinely spent. A short
+# list would leave it still inside its three and quietly pass.
+PAY_EDS = ["2026-10-26", "2026-10-27", "2026-10-28",
+           "2026-10-29", "2026-10-30", "2026-11-02"]
+PAY_DATA = subscribers.norm({"approved": [
+    {"chat_id": 111, "paid_until": "2027-11-02", "plan": "paid"},
+    {"chat_id": 222, "paid_until": "2026-10-28", "plan": "paid"},   # in grace
+    {"chat_id": 333, "paid_until": "2026-01-01", "plan": "paid"},   # lapsed
+    {"chat_id": 444, "trial_started": "2026-11-01"},                # on trial
+    {"chat_id": 555, "trial_started": "2026-01-01"},                # trial spent
+    {"chat_id": 666},                                               # nothing
+]})
+
+# Without `today`, behaviour is exactly what it was before the paywall
+# existed. This is what stops a caller that has not been taught about
+# entitlement from delivering to nobody.
+expect("the unfiltered call still returns every approved chat",
+       subscribers.recipients(PAY_DATA, 999),
+       [999, 111, 222, 333, 444, 555, 666])
+
+expect("filtered, the list is exactly owner + paid + grace + trial",
+       subscribers.recipients(PAY_DATA, 999, PAY_TODAY, PAY_EDS),
+       [999, 111, 222, 444])
+
+# An owner who also appears in the approved list must be sent to once, and
+# must never be dropped by their own entry's entitlement.
+expect("an owner listed as a subscriber appears once and is never filtered",
+       subscribers.recipients(
+           subscribers.norm({"approved": [{"chat_id": 999},
+                                          {"chat_id": 111, "paid_until": "2027-11-02"}]}),
+           999, PAY_TODAY, PAY_EDS),
+       [999, 111])
+
+expect("with no owner configured, only entitled chats remain",
+       subscribers.recipients(PAY_DATA, None, PAY_TODAY, PAY_EDS),
+       [111, 222, 444])
+
+ROWS = subscribers.entitlement_report(PAY_DATA, 999, PAY_TODAY, PAY_EDS)
+expect("the report explains every approved chat but the owner", len(ROWS), 6)
+expect("and names the reason for each",
+       {r["chat_id"]: r["state"] for r in ROWS},
+       {111: "paid", 222: "grace", 333: "lapsed",
+        444: "trial", 555: "lapsed", 666: "none"})
+expect("the report carries nothing but the id, plan and verdict",
+       sorted({k for r in ROWS for k in r}),
+       ["chat_id", "detail", "entitled", "plan", "state"])
+
+# --- payments arriving through the queue -----------------------------------
+# The queue is at-least-once, so the danger here is not the usual "applying
+# twice is a no-op" — applying a payment twice would grant two years for one
+# charge. Idempotency is carried by the Stripe event id.
+PAID = {"id": "z-stripe-evt_1", "verb": "paid", "chat_id": 777,
+        "event_id": "evt_1", "years": 1,
+        "stripe_customer_id": "cus_1", "stripe_subscription_id": "sub_1"}
+
+d, notes = apply_queue([PAID], fresh(), OWNER)
+got = d["approved"][0]
+expect("a payment from an unknown chat enrols them without owner approval",
+       [e["chat_id"] for e in d["approved"]], [777])
+expect("and grants a year, recording the plan",
+       (got["plan"], bool(got["paid_until"])), ("paid", True))
+expect("and keeps the Stripe ids for later reconciliation",
+       (got["stripe_customer_id"], got["stripe_subscription_id"]), ("cus_1", "sub_1"))
+
+# The one that would cost real money if it were wrong.
+first = got["paid_until"]
+d, _ = apply_queue([PAID], d, OWNER)
+expect("replaying the same Stripe event does not grant a second year",
+       d["approved"][0]["paid_until"], first)
+
+# A genuine renewal, a different event, must extend.
+d, _ = apply_queue([{**PAID, "id": "z-stripe-evt_2", "event_id": "evt_2"}], d, OWNER)
+expect("a different payment event does extend access",
+       d["approved"][0]["paid_until"] > first, True)
+
+# Paying after opting out should bring someone back rather than leaving them
+# on the unsubscribed list and silently never delivering.
+d_out = fresh()
+d_out["unsubscribed"].append({"chat_id": 777, "type": "private",
+                              "stopped": "2026-01-01"})
+d_out, _ = apply_queue([PAID], d_out, OWNER)
+expect("paying after unsubscribing re-enrols the payer",
+       ([e["chat_id"] for e in d_out["approved"]],
+        [e["chat_id"] for e in d_out["unsubscribed"]]), ([777], []))
+
+# A pending chat that pays is promoted, not duplicated.
+d_pend = fresh()
+d_pend["pending"].append({"chat_id": 777, "type": "private", "seen": "2026-11-01"})
+d_pend, _ = apply_queue([PAID], d_pend, OWNER)
+expect("paying while pending promotes rather than duplicating",
+       (len(d_pend["approved"]), len(d_pend["pending"])), (1, 0))
+
+# The owner is excluded from every queued decision, payments included.
+d_own, _ = apply_queue([{**PAID, "chat_id": OWNER}], fresh(), OWNER)
+expect("a payment attributed to the owner is skipped", len(d_own["approved"]), 0)
+
+# --- cancellation must not revoke ------------------------------------------
+d_can = fresh()
+d_can["approved"].append({"chat_id": 777, "paid_until": "2027-11-02", "plan": "paid"})
+d_can, _ = apply_queue([{"id": "z-stripe-evt_c", "verb": "cancelled",
+                         "chat_id": 777, "event_id": "evt_c"}], d_can, OWNER)
+expect("cancelling stops the renewal but keeps the year already paid for",
+       (d_can["approved"][0]["plan"], d_can["approved"][0]["paid_until"]),
+       ("cancelled", "2027-11-02"))
+
+d_can, _ = apply_queue([{"id": "z-stripe-evt_c", "verb": "cancelled",
+                         "chat_id": 777, "event_id": "evt_c"}], d_can, OWNER)
+expect("and cancelling twice changes nothing",
+       d_can["approved"][0]["paid_until"], "2027-11-02")
+
+d_none, notes = apply_queue([{"id": "x", "verb": "cancelled", "chat_id": 999999}],
+                            fresh(), OWNER)
+expect("cancelling someone not on the list is reported, not an error",
+       len(d_none["approved"]), 0)
+
+# A cancelled subscriber still receives until their year runs out. This is the
+# whole point of not revoking, so it is checked end to end rather than implied.
+expect("a cancelled but unexpired subscriber still receives the briefing",
+       subscribers.recipients(d_can, OWNER, PAY_TODAY, PAY_EDS), [OWNER, 777])
+
+# --- the one-off migration onto the paywall --------------------------------
+# Getting this wrong in the generous direction costs nothing; getting it wrong
+# in the strict direction cuts off four people who never agreed to pay.
+GF = subscribers.norm({"approved": [
+    {"chat_id": 111},
+    {"chat_id": 222, "paid_until": "2026-12-01", "plan": "paid"},
+    {"chat_id": 333, "trial_started": "2026-11-01"},
+]})
+notes = subscribers.grandfather(GF, PAY_TODAY)
+by_id = {e["chat_id"]: e for e in GF["approved"]}
+
+expect("a chat with no entitlement gets a free year",
+       (by_id[111]["paid_until"], by_id[111]["plan"]),
+       ("2027-11-02", "grandfathered"))
+expect("an existing payment is not overwritten or extended",
+       (by_id[222]["paid_until"], by_id[222]["plan"]), ("2026-12-01", "paid"))
+expect("a chat mid-trial is left on its trial",
+       (by_id[333].get("paid_until"), by_id[333]["trial_started"]),
+       (None, "2026-11-01"))
+expect("every chat is accounted for in the notes", len(notes), 3)
+
+# Running it twice must not extend anybody — it is a migration, not a renewal.
+subscribers.grandfather(GF, PAY_TODAY)
+expect("running it again changes nothing",
+       {e["chat_id"]: e.get("paid_until") for e in GF["approved"]},
+       {111: "2027-11-02", 222: "2026-12-01", 333: None})
+
+# And the fields have to survive a save/load round trip, or the migration is
+# written and then silently dropped by the store.
+with tempfile.TemporaryDirectory() as td:
+    q = Path(td) / "subscribers.json"
+    subscribers.save(GF, q)
+    back = subscribers.load(q)
+    expect("entitlement fields survive save/load",
+           {e["chat_id"]: (e.get("paid_until"), e.get("plan"), e.get("trial_started"))
+            for e in back["approved"]},
+           {111: ("2027-11-02", "grandfathered", None),
+            222: ("2026-12-01", "paid", None),
+            333: (None, None, "2026-11-01")})
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

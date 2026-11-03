@@ -45,6 +45,12 @@ const MSG = {
     "You are the owner of this briefing. Your own copy is configured in the " +
     "repository, not by this bot, so it will keep arriving.",
   denied: "Your subscription request was not approved.",
+  paid:
+    "Payment received — thank you. Your subscription runs for a year from " +
+    "today, and the next briefing is on its way.",
+  cancelled:
+    "Your subscription will not renew. You keep receiving the briefing until " +
+    "the year you have paid for runs out.",
 };
 
 const START = new Set(["/start", "/subscribe"]);
@@ -54,7 +60,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-09-30a";
+const VERSION = "2026-11-02a";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -62,6 +68,180 @@ const VERSION = "2026-09-30a";
 //
 // Deliberately not under the `q:` prefix, so listing the queue never picks it up.
 const LIST_KEY = "list";
+
+/** The chat a Stripe customer belongs to, learned at checkout. */
+async function chatForCustomer(env, customerId) {
+  if (!customerId) return null;
+  const { list } = await storedList(env);
+  for (const key of ["approved", "pending", "unsubscribed"]) {
+    for (const e of (list && list[key]) || []) {
+      if (e.stripe_customer_id === customerId) return e.chat_id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Turn a verified Stripe event into a queued decision.
+ *
+ * Queued, not applied. Every other decision this Worker makes goes through the
+ * same queue, drained and committed by subscriptions.yml, and payments have no
+ * business being the one exception: the queue is what makes the whole thing
+ * at-least-once and replay-safe, and apply_queue() is where the list is
+ * actually written.
+ *
+ * The queue key is the Stripe event id, so Stripe's own retries collapse onto
+ * one entry rather than granting a year each time.
+ *
+ * WHICH EVENTS GRANT, AND WHY ONLY THOSE
+ *
+ * A first payment raises BOTH checkout.session.completed and invoice.paid. If
+ * both granted, a new subscriber would get two years for one payment. So the
+ * first payment is granted from the checkout session, which is also the only
+ * event carrying client_reference_id and therefore the only place the chat id
+ * can be learned; and invoice.paid grants only when its billing_reason says
+ * subscription_cycle, which is a renewal.
+ */
+async function onStripe(env, event) {
+  const obj = (event && event.data && event.data.object) || {};
+  const type = event && event.type;
+  const evt = event && event.id;
+  const key = `z-stripe-${evt}`;   // sorts after the numeric Telegram ids
+
+  if (type === "checkout.session.completed") {
+    const chat = Number(obj.client_reference_id);
+    if (!Number.isFinite(chat) || !chat) {
+      // Nothing ties this payment to a chat. Refunding or linking it by hand
+      // is the owner's call, so say so loudly rather than dropping it.
+      console.warn("checkout.session.completed with no usable client_reference_id;",
+                   "payment cannot be linked to a chat:", evt);
+      await notifyOwner(env,
+        "A Stripe payment arrived that is not linked to any Telegram chat. " +
+        "It needs linking or refunding by hand. Stripe event: " + evt);
+      return { handled: false, why: "no client_reference_id" };
+    }
+    await enqueueKeyed(env, {
+      verb: "paid", chat_id: chat, event_id: evt, years: 1,
+      stripe_customer_id: obj.customer || null,
+      stripe_subscription_id: obj.subscription || null,
+    }, key);
+    // Answer now rather than at the next drain. They have just paid; a
+    // five-minute silence is exactly when someone wonders if it worked.
+    await tg(env, "sendMessage", { chat_id: chat, text: MSG.paid });
+    return { handled: true };
+  }
+
+  if (type === "invoice.paid") {
+    if (obj.billing_reason && obj.billing_reason !== "subscription_cycle") {
+      // The first invoice of a new subscription. checkout.session.completed
+      // has it; granting here as well would double it.
+      return { handled: false, why: `ignored billing_reason ${obj.billing_reason}` };
+    }
+    const chat = await chatForCustomer(env, obj.customer);
+    if (!chat) {
+      console.warn("invoice.paid for a customer not on the list:", evt);
+      return { handled: false, why: "customer not on the list" };
+    }
+    await enqueueKeyed(env, {
+      verb: "paid", chat_id: chat, event_id: evt, years: 1,
+      stripe_customer_id: obj.customer || null,
+    }, key);
+    return { handled: true };
+  }
+
+  if (type === "customer.subscription.deleted") {
+    const chat = await chatForCustomer(env, obj.customer);
+    if (!chat) return { handled: false, why: "customer not on the list" };
+    // Deliberately does NOT revoke. They paid for a year; cancelling stops the
+    // renewal, it does not buy back the months already paid for.
+    await enqueueKeyed(env, { verb: "cancelled", chat_id: chat, event_id: evt }, key);
+    await tg(env, "sendMessage", { chat_id: chat, text: MSG.cancelled });
+    return { handled: true };
+  }
+
+  if (type === "invoice.payment_failed") {
+    // Stripe retries on its own schedule; the grace window exists so this is
+    // not felt as being cut off. Nothing to do but leave a trace.
+    console.warn("invoice.payment_failed:", evt);
+    return { handled: false, why: "payment failed, left to Stripe's retries" };
+  }
+
+  return { handled: false, why: `no handler for ${type}` };
+}
+
+// --- Stripe webhook verification -------------------------------------------
+//
+// Stripe signs every delivery. The header looks like
+//
+//     t=1614556800,v1=<hex hmac>,v1=<another>,v0=<legacy>
+//
+// and the signed payload is `${t}.${raw body}` — the RAW body, byte for byte.
+// Parsing the JSON first and re-serialising it changes the bytes and every
+// signature then fails, which is the classic way to get this wrong.
+//
+// Without this check the endpoint is an open door: anyone who learns the URL
+// could POST a fabricated "payment succeeded" and subscribe themselves free.
+const STRIPE_TOLERANCE_S = 300;
+
+function timingSafeEqual(a, b) {
+  // Compares in constant time. A plain === leaks, through its own early exit,
+  // how much of a guessed signature was correct.
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function hmacHex(secret, payload) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(payload));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** {ok} or {ok:false, why} — `why` is for the Worker log, never the response. */
+async function stripeSigned(env, raw, header, nowMs) {
+  if (!env.STRIPE_WEBHOOK_SECRET) {
+    return { ok: false, why: "STRIPE_WEBHOOK_SECRET is not set on this Worker" };
+  }
+  if (!header) {
+    return { ok: false, why: "no Stripe-Signature header — this did not come from Stripe" };
+  }
+  const parts = {};
+  for (const kv of String(header).split(",")) {
+    const i = kv.indexOf("=");
+    if (i < 0) continue;
+    const k = kv.slice(0, i).trim();
+    (parts[k] = parts[k] || []).push(kv.slice(i + 1).trim());
+  }
+  const t = Number((parts.t || [])[0]);
+  if (!Number.isFinite(t)) {
+    return { ok: false, why: "the signature header carried no timestamp" };
+  }
+  // Replay protection. Without it, one captured delivery could be replayed
+  // forever; Stripe's own libraries default to the same five minutes.
+  const age = Math.abs(nowMs / 1000 - t);
+  if (age > STRIPE_TOLERANCE_S) {
+    return {
+      ok: false,
+      why: `signature is ${Math.round(age)}s old, over the ${STRIPE_TOLERANCE_S}s ` +
+           "tolerance — a replay, or this Worker's clock is wrong",
+    };
+  }
+  const expected = await hmacHex(env.STRIPE_WEBHOOK_SECRET, `${t}.${raw}`);
+  const offered = parts.v1 || [];
+  if (!offered.some((v) => timingSafeEqual(v, expected))) {
+    return {
+      ok: false,
+      why: "no v1 signature matched — STRIPE_WEBHOOK_SECRET here and the " +
+           "signing secret of the endpoint in Stripe differ, or the body was altered",
+    };
+  }
+  return { ok: true };
+}
 
 async function tg(env, method, body) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
@@ -88,6 +268,22 @@ const say = (env, chat_id, text, extra = {}) =>
  * Deriving the key from update_id also makes enqueueing idempotent: Telegram
  * retrying a delivery rewrites the same key instead of queueing a duplicate.
  */
+/** Queue under a caller-chosen key, so a retried delivery collapses onto one. */
+async function enqueueKeyed(env, item, key) {
+  const id = `q:${key}`;
+  await env.QUEUE.put(id, JSON.stringify({ id: key, ...item }));
+  return key;
+}
+
+async function notifyOwner(env, text) {
+  if (!env.OWNER_CHAT_ID) return;
+  try {
+    await tg(env, "sendMessage", { chat_id: env.OWNER_CHAT_ID, text });
+  } catch (e) {
+    console.error("could not notify the owner", e && e.stack);
+  }
+}
+
 async function enqueue(env, item, seq, n = 0) {
   const uid = Number.isFinite(seq) ? seq : Date.now();
   const id = `${String(uid).padStart(16, "0")}-${String(n).padStart(4, "0")}`;
@@ -287,10 +483,20 @@ export default {
       // leak nothing.
       const config = {};
       for (const name of ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
-                          "DRAIN_SECRET", "LIST_URL", "QUEUE"]) {
+                          "DRAIN_SECRET", "LIST_URL", "QUEUE",
+                          "STRIPE_WEBHOOK_SECRET"]) {
         config[name] = Boolean(env[name]);
       }
-      const missing = Object.entries(config).filter(([, v]) => !v).map(([k]) => k);
+      // STRIPE_WEBHOOK_SECRET is reported but does not count as missing. The
+      // paywall is a later arrival than the rest of this Worker, and a health
+      // check that reads "not ok" for months before anyone sets up Stripe is a
+      // health check people learn to ignore. /stripe refuses clearly on its own
+      // when the secret is absent, which is where that failure belongs.
+      const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET"]);
+      const missing = Object.entries(config)
+        .filter(([k, v]) => !v && !OPTIONAL.has(k)).map(([k]) => k);
+      const unconfigured = Object.entries(config)
+        .filter(([k, v]) => !v && OPTIONAL.has(k)).map(([k]) => k);
 
       // A value pasted into a dashboard field very easily carries a trailing
       // newline or space, which is equally invisible and equally fatal.
@@ -322,6 +528,8 @@ export default {
           unsubscribed: list ? (list.unsubscribed || []).length : null,
         },
         config,
+        // Present but not yet set up. Informational, never a failure.
+        unconfigured,
         ...(missing.length ? { missing } : {}),
         ...(untrimmed.length
           ? { whitespace: untrimmed, hint: "these have leading or trailing whitespace" }
@@ -373,6 +581,39 @@ export default {
         else await onMessage(env, update.message || update.channel_post || {}, seq);
       } catch (e) {
         console.error("handler failed", e && e.stack);
+      }
+      return new Response("ok");
+    }
+
+    if (url.pathname === "/stripe" && request.method === "POST") {
+      // The RAW body, before any parsing. Stripe signs the exact bytes, so
+      // re-serialising parsed JSON here would fail every signature.
+      const raw = await request.text();
+      const check = await stripeSigned(
+        env, raw, request.headers.get("stripe-signature"), Date.now(),
+      );
+      if (!check.ok) {
+        // 400, unlike /telegram's always-200. A retry cannot fix a bad
+        // signature, and Stripe showing the endpoint as failing in its
+        // dashboard is exactly the signal a misconfigured secret needs.
+        console.warn("rejected a Stripe delivery:", check.why);
+        return new Response("bad signature", { status: 400 });
+      }
+      let event;
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      try {
+        const out = await onStripe(env, event);
+        if (!out.handled) console.warn("stripe event not acted on:", event.type, out.why);
+      } catch (e) {
+        // 500 so Stripe retries. The queue key is the event id, so a retry
+        // that arrives after a partial success collapses onto the same entry
+        // instead of granting a second year.
+        console.error("stripe handler failed", e && e.stack);
+        return new Response("handler failed", { status: 500 });
       }
       return new Response("ok");
     }
