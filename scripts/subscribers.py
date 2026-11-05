@@ -36,8 +36,10 @@ an argument, so it cannot end up in a process list or a public run log.
 """
 
 import argparse
+import io
 import json
 import os
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -48,6 +50,83 @@ REPO = Path(__file__).resolve().parent.parent
 STORE = REPO / "subscribers.json"
 
 EMPTY = {"approved": [], "pending": [], "unsubscribed": [], "last_update_id": 0}
+
+# ---------------------------------------------------------------------------
+# Keeping chat ids out of public logs
+# ---------------------------------------------------------------------------
+# Chat ids are the personal data that moving the list to Cloudflare KV existed
+# to protect. This repository is public, and so is every Actions log and run
+# summary it produces, so an id reaching stdout, stderr or $GITHUB_STEP_SUMMARY
+# is published as surely as one committed to git. The move to KV fixed the
+# store and left this path open.
+#
+# Masking happens at the OUTPUT BOUNDARY rather than where each note is built.
+# There are some forty places a chat id is formatted into a string, and a fix
+# applied to each is a fix that the next note added forgets. Wrapping the three
+# sinks instead covers whatever is written through them, now and later.
+#
+# Two things must keep their real ids, and both deliberately bypass this:
+#   - the "recipients" action's stdout, which deliver.yml reads with mapfile to
+#     address the sends. Masking it would deliver to nobody. It is not logged:
+#     the workflow consumes it through a process substitution.
+#   - the reply and notice payloads, whose "chat_id" routes a Telegram message
+#     and whose text the owner reads privately to decide whom to approve. They
+#     are written as JSON to a file for send_replies.sh, never printed.
+# This is the policy process() already states for display names — "only to the
+# owner's private chat, never to a public log" — applied to ids as well.
+
+_ID_RE = re.compile(r"\d{6,}")
+
+
+def mask(chat_id) -> str:
+    """A chat id safe for a public log: enough to tell two chats apart."""
+    s = str(chat_id)
+    return f"…{s[-3:]}" if len(s) > 3 else "…"
+
+
+def scrub(text: str) -> str:
+    """Mask every chat id in free text.
+
+    Six digits or more, so a year, a port or a four-digit count survives and
+    only something id-shaped is touched; Telegram ids are nine or ten. A
+    negative group id keeps its minus sign, which is worth seeing — the digits
+    are what identify the chat.
+
+    Assumes an id is formatted into a string whole, which is true of every
+    f-string and of print()'s per-argument writes; nothing here builds a number
+    a digit at a time.
+    """
+    return _ID_RE.sub(lambda m: mask(m.group()), text)
+
+
+class _ScrubbedStream(io.TextIOBase):
+    """A text stream that masks chat ids on the way out."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        self._stream.write(scrub(text))
+        return len(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._stream, "encoding", "utf-8")
+
+
+# The "recipients" and "commands" actions put machine-readable text on stdout —
+# ids for mapfile, JSON for setMyCommands — so stdout is left alone for those.
+# Their stderr is still a log and is still masked.
+RAW_STDOUT_ACTIONS = {"recipients", "commands"}
+
+
+def write_public(path: str, text: str) -> None:
+    """Append to a run summary, with chat ids masked."""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(scrub(text))
 
 # /subscribe and /unsubscribe are accepted alongside the conventional Telegram
 # commands because people type what they mean, not what the bot documents.
@@ -934,8 +1013,7 @@ def write_step_summary(diag: dict, data: dict, replies: list) -> None:
                 + " — reply `/pending` to the bot, or use the `approve` input on "
                   "*Find my Telegram chat ID*."]
 
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(out) + "\n")
+    write_public(path, "\n".join(out) + "\n")
 
 
 def parse_ids(raw: str) -> set:
@@ -968,6 +1046,13 @@ def main() -> int:
     ap.add_argument("--report", default="",
                     help="write the per-chat entitlement table here (recipients)")
     args = ap.parse_args()
+
+    # From here on, anything printed is a public Actions log. See "Keeping chat
+    # ids out of public logs" above for why this is done here and not at each
+    # of the ~40 places an id is formatted, and for the two paths left raw.
+    sys.stderr = _ScrubbedStream(sys.stderr)
+    if args.action not in RAW_STDOUT_ACTIONS:
+        sys.stdout = _ScrubbedStream(sys.stdout)
 
     store = Path(args.store)
     data = load(store)
@@ -1088,8 +1173,7 @@ def main() -> int:
                 out += ["", "**What changed**", ""] + [f"- {n}" for n in notes]
             out += ["", "Replies were sent by the Worker at the time each message "
                     "arrived; this step only brings the committed list into line."]
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write("\n".join(out) + "\n")
+            write_public(path, "\n".join(out) + "\n")
         return 0
 
     if args.action == "process":
@@ -1159,11 +1243,13 @@ def main() -> int:
         if new:
             save(data, store)
             print(f"\n{len(new)} new chat(s) recorded as pending. They receive NOTHING yet.")
-            print("Approve with:  Actions -> Find my Telegram chat ID -> Run workflow,")
-            print("               and put the id(s) in the 'approve' input. Or edit")
-            print("               subscribers.json directly.")
-            print("\nNames above are shown only to help you decide and are NOT stored.")
-            print("Note: on a public repository, run logs are public too.")
+            print("\nThe ids above are masked to their last three digits, because this")
+            print("log is public. To get the full ids, send the bot /pending — it")
+            print("answers in your own chat. Then approve with:")
+            print("  Actions -> Find my Telegram chat ID -> Run workflow, putting the")
+            print("  id(s) in the 'approve' input.")
+            print("\nNames above are shown only to help you decide and are NOT stored,")
+            print("but note that on a public repository this log is public.")
         else:
             print("\nNo new chats. subscribers.json unchanged.")
 

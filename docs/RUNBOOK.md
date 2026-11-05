@@ -308,7 +308,7 @@ approved messages nobody, so the owner can re-run the workflow freely.
 | `/start`, `/stop` answered | milliseconds | next poll, 5–15 min |
 | owner notified of a request | milliseconds, with Approve/Deny buttons | next poll |
 | Approve → subscriber told | milliseconds | immediately, if approved from the GitHub workflow |
-| `subscribers.json` caught up | ≤ 5 min | same poll |
+| the stored list caught up | hours, not minutes | GitHub throttles the poller; see *Adding someone* above |
 
 `worker/README.md` has the one-time deploy. The switch is the
 `TELEGRAM_DRAIN_URL` secret: present means drain the Worker's queue, absent means
@@ -316,15 +316,28 @@ poll. **Setting a Telegram webhook disables `getUpdates`** — they are mutually
 exclusive — which is why this is a switch and not an addition, and why undoing it
 means deleting both the webhook and the secret.
 
-Under the webhook there is one narrow lag that matters: a subscriber approved
-seconds before an edition is generated may miss that one edition, because
-delivery reads the committed list. They get the next one.
+That lag used to cost an edition: a subscriber approved seconds before one was
+generated missed it. It no longer does. `deliver.yml` drains the queue itself
+before it reads the list, so an approval — or a payment — lands in the edition
+it preceded rather than the one after.
 
-Only numeric chat IDs and a chat type are ever committed — never names or
-usernames. The workflow prints display names in its log so you can tell who is
-asking to be added, and on a public repository **run logs are public too**, so
-that is the one place a subscriber's name is briefly exposed. If that matters,
-make the repo private; nothing else in the pipeline depends on it being public
+**Chat IDs no longer appear in any log.** The list itself lives in Cloudflare
+KV rather than in this repository, and `subscribers.py` masks every id on the
+way out of the process — `…890`, enough to tell two chats apart and not enough
+to message one. That covers stdout, stderr and the run summaries, in every
+workflow. Two paths deliberately keep the real id: the `recipients` output that
+`deliver.yml` reads to address the sends, which is consumed through a pipe and
+never logged, and the Telegram payloads, which is how **you** still get full
+ids — send the bot `/pending` and it answers in your own chat.
+
+**Display names are the exception, and still reach the log.** The discovery
+workflow prints them so you can tell who is asking to be added, and on a public
+repository **run logs are public too**. Masking a name is not useful the way
+masking a number is — a half-shown name identifies the person as well as the
+whole one — so this is a trade rather than an oversight. The same is true of an
+id you type into the `approve` input: GitHub shows a workflow's inputs on the
+run page, so that one number is public whatever this code does. If either
+matters, make the repo private; nothing else here depends on it being public
 except free Actions minutes.
 
 **A subscriber who blocks the bot** fails every morning with
