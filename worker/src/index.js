@@ -86,7 +86,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-03a";
+const VERSION = "2026-11-05a";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -367,6 +367,79 @@ const decisionKeyboard = (chat_id) => ({
   },
 });
 
+// --- Stripe Checkout Session ------------------------------------------------
+//
+// Configured in Checkout Studio. Gated on STRIPE_SECRET_KEY: without it the
+// route 404s and nothing changes, which is how every other part of this
+// paywall is staged.
+//
+// WHY THIS SITS BESIDE THE PAYMENT LINK RATHER THAN REPLACING IT
+//
+// The paywall already works through a dashboard Payment Link with
+// ?client_reference_id=<chat id>, chosen so that no key capable of moving
+// money lives in this Worker. Creating a Checkout Session needs the secret
+// key here, so this is a deliberate change of posture, not a refactor — and
+// both paths raise the same checkout.session.completed event, which /stripe
+// already handles. Nothing downstream needed changing.
+//
+// There is no Stripe SDK in this project: the Worker is a single file pasted
+// into the dashboard with no build step and no imports, so this calls the
+// REST API with fetch and form encoding, as it already does for Telegram.
+// That is also why ui_mode defaults to hosted_page — there is no SDK version
+// to read. See STRIPE_INTEGRATION_TODO.md.
+function checkoutForm(env, chatId) {
+  const f = new URLSearchParams();
+
+  // fixed_by_ui — set in Checkout Studio, used exactly as given.
+  f.set("ui_mode", "hosted_page");
+  f.set("billing_address_collection", "auto");
+  f.set("phone_number_collection[enabled]", "false");
+  f.set("automatic_tax[enabled]", "false");
+  f.set("allow_promotion_codes", "true");
+  f.set("submit_type", "auto");
+  f.set("saved_payment_method_options[payment_method_save]", "enabled");
+  f.set("integration_identifier", "hosted_web_0001");
+  f.set("origin_context", "web");
+
+  // The briefing is sold as an annual subscription, so mode is subscription
+  // and payment_method_collection applies (it is only valid for that mode).
+  f.set("mode", "subscription");
+  f.set("payment_method_collection", "always");
+
+  // sample_only — placeholders, listed in STRIPE_INTEGRATION_TODO.md.
+  f.set("success_url", (env.CHECKOUT_SUCCESS_URL || "https://example.com/success") +
+    "?session_id={CHECKOUT_SESSION_ID}");
+  f.set("cancel_url", env.CHECKOUT_CANCEL_URL || "https://example.com/cancel");
+  f.set("line_items[0][price]", env.STRIPE_PRICE_ID || "price_...");
+  f.set("line_items[0][quantity]", "1");
+
+  // Not from Checkout Studio, and not optional here: /stripe matches a
+  // payment to a Telegram chat by this field alone. Without it a completed
+  // checkout cannot be attributed to anybody.
+  if (chatId) f.set("client_reference_id", String(chatId));
+  return f;
+}
+
+async function createCheckoutSession(env, chatId) {
+  const r = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: checkoutForm(env, chatId).toString(),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    // Stripe's own message is the useful part; surface it to the log rather
+    // than to the caller, since it can name configuration.
+    const why = (body.error && body.error.message) || `HTTP ${r.status}`;
+    console.error("checkout session refused:", why);
+    return { ok: false, why };
+  }
+  return { ok: true, url: body.url, id: body.id };
+}
+
 // --- the paywall ------------------------------------------------------------
 //
 // PAY_URL is the switch. Until it is set, /start behaves exactly as it did
@@ -617,7 +690,8 @@ export default {
       const config = {};
       for (const name of ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
                           "DRAIN_SECRET", "LIST_URL", "QUEUE",
-                          "STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]) {
+                          "STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
+                          "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]) {
         config[name] = Boolean(env[name]);
       }
       // STRIPE_WEBHOOK_SECRET is reported but does not count as missing. The
@@ -629,7 +703,8 @@ export default {
       // are codes, so neither absence is a fault. /health still reports both,
       // because "is the paywall actually on?" is otherwise unanswerable from
       // outside.
-      const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]);
+      const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
+                                "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]);
       const missing = Object.entries(config)
         .filter(([k, v]) => !v && !OPTIONAL.has(k)).map(([k]) => k);
       const unconfigured = Object.entries(config)
@@ -753,6 +828,23 @@ export default {
         return new Response("handler failed", { status: 500 });
       }
       return new Response("ok");
+    }
+
+    if (url.pathname === "/create-checkout-session" && request.method === "POST") {
+      if (!env.STRIPE_SECRET_KEY) {
+        // Not configured, so not a route. Deliberately indistinguishable from
+        // an unknown path: an endpoint that announces it exists but cannot
+        // work is only useful to somebody probing.
+        return new Response("not found", { status: 404 });
+      }
+      let chatId = url.searchParams.get("chat_id");
+      if (!chatId) {
+        const body = await request.json().catch(() => ({}));
+        chatId = body && body.chat_id;
+      }
+      const out = await createCheckoutSession(env, chatId);
+      if (!out.ok) return new Response("could not create a session", { status: 502 });
+      return Response.json({ url: out.url, id: out.id });
     }
 
     if (url.pathname === "/queue" && request.method === "GET") {

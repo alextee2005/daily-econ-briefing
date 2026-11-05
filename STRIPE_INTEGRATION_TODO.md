@@ -1,0 +1,214 @@
+# Stripe integration — remaining steps
+
+Hosted Stripe Checkout, configured in Checkout Studio. This file is the single
+source of truth for what is left to do.
+
+**Scenario B applied.** No Checkout Session API call existed anywhere in this
+repository, so one was added. Nothing else was changed: the webhook handler,
+secret loading and subscriber bookkeeping already existed and were left alone.
+
+## Read this first
+
+This repository already accepts Stripe payments through a **dashboard Payment
+Link**, not an API call. That was a deliberate choice: the link carries
+`?client_reference_id=<telegram chat id>` and the Worker only *verifies*
+webhooks, so no key capable of moving money has ever lived there.
+
+The Checkout Session route added here needs `STRIPE_SECRET_KEY` on the Worker,
+which reverses that. Both routes raise the same `checkout.session.completed`
+event and the existing `/stripe` handler serves both, so nothing downstream
+changed — but you now have two ways to pay, and you should pick one:
+
+| | Payment Link (already working) | Checkout Session (added here) |
+|---|---|---|
+| Secret key in the Worker | no | **yes, required** |
+| Checkout Studio settings | not applied | applied |
+| Per-session control | none | full |
+| Status | live once `PAY_URL` is set | inert until `STRIPE_SECRET_KEY` is set |
+
+**Neither is switched on right now.** The route 404s without
+`STRIPE_SECRET_KEY`, exactly as an unknown path does.
+
+## Values to Replace
+
+The following values are placeholders and must be updated before going live.
+
+**Files containing placeholders:**
+- [worker/src/index.js](worker/src/index.js) — `checkoutForm()`
+
+Each one reads from a Worker variable and falls back to a placeholder, so you
+set these in the Cloudflare dashboard rather than editing code.
+
+| Field | Current Value | What to Set |
+|-------|--------------|-------------|
+| line_items[].price | `price_...` | Your real Stripe Price ID — the $4.99/year recurring price. Dashboard → Product catalogue, or https://dashboard.stripe.com/prices. Set it as the Worker variable `STRIPE_PRICE_ID`. |
+| success_url | `https://example.com/success?session_id={CHECKOUT_SESSION_ID}` | Where to send someone after paying. **This project has no website** — it is a Telegram bot — so the sensible value is your bot's deep link, e.g. `https://t.me/your_bot`. Set the Worker variable `CHECKOUT_SUCCESS_URL`; the `?session_id={CHECKOUT_SESSION_ID}` template is appended automatically, so do not include it yourself. |
+| cancel_url | `https://example.com/cancel` | Where to send someone who abandons checkout. Again your bot link is the natural choice. Worker variable `CHECKOUT_CANCEL_URL`. |
+
+### mode — already correct, no change needed
+
+`mode` is listed as a placeholder in the Checkout Studio brief, but the
+product type here is not in doubt: the briefing is sold as **$4.99 per year,
+recurring**, so it is set to `subscription`. `payment_method_collection` is
+only valid in that mode and is included for the same reason. Change it only if
+you switch to selling one-off editions.
+
+## Configured Parameters
+
+These parameters were configured in Checkout Studio and are already set
+correctly.
+
+**Files containing these parameters:**
+- [worker/src/index.js](worker/src/index.js) — `checkoutForm()`
+
+| Parameter | Value |
+|-----------|-------|
+| ui_mode | `hosted_page` |
+| billing_address_collection | `auto` |
+| phone_number_collection | `{ enabled: false }` |
+| automatic_tax | `{ enabled: false }` |
+| allow_promotion_codes | `true` |
+| payment_method_collection | `always` |
+| submit_type | `auto` |
+| saved_payment_method_options | `{ payment_method_save: enabled }` |
+| integration_identifier | `hosted_web_0001` |
+| origin_context | `web` |
+
+Each is asserted individually in `worker/test.mjs`. A dropped parameter is the
+failure that would otherwise go unnoticed: Stripe accepts the call, checkout
+works, and the setting you chose in the UI simply is not in effect.
+
+### A version dependency you should know about
+
+`ui_mode` is set to `hosted_page`, which is correct for Stripe SDK **21.0.0
+and above**. Below that it must be `hosted`.
+
+**There is no Stripe SDK in this project to read a version from.** The Worker
+is a single file pasted into the Cloudflare dashboard with no build step and
+no imports, so it calls the REST API directly with `fetch` and form encoding —
+the same way it already calls Telegram. `package.json` carries only
+`playwright`, for PDF rendering.
+
+Because the REST API is versioned by account rather than by SDK, `hosted_page`
+is the right default. If Stripe rejects `ui_mode`, change it to `hosted` in
+`checkoutForm()`.
+
+No API version is pinned anywhere, as instructed — your account default
+applies.
+
+## Setup
+
+### Worker variables (Cloudflare dashboard)
+
+Settings → **Variables and Secrets**. Note the trap this project has hit
+before: *Settings → Build → Build variables* is build-time only and invisible
+to the Worker. Use **Variables and Secrets**, then **Deploy**.
+
+| Name | Type | Purpose |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | Secret | `sk_test_…` then `sk_live_…`. **Setting this activates the route.** |
+| `STRIPE_PRICE_ID` | Text | Your $4.99/year Price ID |
+| `CHECKOUT_SUCCESS_URL` | Text | e.g. `https://t.me/your_bot` |
+| `CHECKOUT_CANCEL_URL` | Text | e.g. `https://t.me/your_bot` |
+| `STRIPE_WEBHOOK_SECRET` | Secret | **already documented** — `whsec_…`, for `/stripe` |
+
+Never commit a key. This repository is public and has no `.env` by design:
+secrets live in GitHub Actions secrets and Cloudflare Worker variables. See
+https://docs.stripe.com/keys-best-practices.
+
+### Already present — do not add again
+
+- **Webhook handler** at `/stripe`, with signature verification, replay
+  protection and idempotency keyed on the Stripe event id
+- **Event handling** for `checkout.session.completed`, `invoice.paid`,
+  `customer.subscription.deleted` and `invoice.payment_failed`
+- **Entitlement and fulfilment** — `scripts/entitlement.py`, applied at
+  delivery
+- **Secret loading** — GitHub Actions secrets and Worker variables
+
+## Project structure
+
+No new files were created for the integration itself. The change is one route
+and one helper inside the existing Worker:
+
+```
+worker/src/index.js          POST /create-checkout-session  (new)
+                             checkoutForm()                 (new)
+                             POST /stripe                   (already existed)
+worker/test.mjs              24 new cases for the above
+STRIPE_INTEGRATION_TODO.md   this file
+```
+
+## How it works
+
+```
+Telegram /start
+  → bot replies with a pay link
+  → customer pays on Stripe's hosted page
+  → Stripe fires checkout.session.completed
+  → Worker POST /stripe verifies the signature, queues "paid"
+  → subscriptions.yml drains the queue, grants a year
+  → deliver.yml sends only to entitled chats
+```
+
+The new route sits at the first step as an alternative to the static Payment
+Link: `POST /create-checkout-session` with `{"chat_id": 12345}` (or
+`?chat_id=12345`) returns `{"url": "https://checkout.stripe.com/…"}` to send
+to the subscriber.
+
+**`client_reference_id` is not optional.** `/stripe` matches a completed
+payment to a Telegram chat by that field alone; without it a payment cannot be
+attributed to anybody and the owner is messaged to sort it out by hand.
+
+One caveat, unchanged from the Payment Link: `chat_id` is caller-supplied, so
+somebody could create a session for a chat that is not theirs. The only
+outcome is paying for someone else's subscription, so it is left as is.
+
+## Testing
+
+Use test mode (`sk_test_…`) with a test Price ID.
+
+| Card | Behaviour |
+|---|---|
+| `4242 4242 4242 4242` | succeeds |
+| `4000 0025 0000 3155` | requires 3D Secure authentication |
+| `4000 0000 0000 9995` | declined, insufficient funds |
+| `4000 0000 0000 0341` | attaches but fails on the first charge — useful for renewals |
+
+Any future expiry, any CVC, any postcode.
+
+```bash
+curl -X POST "$WORKER/create-checkout-session" \
+  -H 'content-type: application/json' -d '{"chat_id": 123456}'
+```
+
+Then check `$WORKER/health` shows the expected `version`, and watch the
+delivery summary's entitlement table for the chat moving to `paid`.
+
+Run the suites with `node worker/test.mjs` and
+`python3 scripts/test_subscribers.py`.
+
+## Next steps
+
+1. **Decide: Payment Link or Checkout Session.** Running both means two paths
+   to maintain for one product.
+2. Set the four Worker variables above and **Deploy**.
+3. Point a Stripe webhook at `<worker>/stripe` if you have not already, and
+   paste its signing secret into `STRIPE_WEBHOOK_SECRET`.
+4. Test with a test-mode card end to end, through to the entitlement table.
+5. Switch to live keys, and set `STRIPE_PAY_URL` in GitHub secrets — **that is
+   the step that starts enforcing the paywall at delivery.**
+6. **Enable the Stripe customer portal.** This is a real gap, not a nicety:
+   `/stop` removes someone from the delivery list but cannot cancel their
+   subscription, so until a portal link exists an opt-out keeps being charged
+   unless you cancel it in the dashboard yourself.
+7. Fulfilment and order tracking already exist — payments become entitlement
+   in `subscribers.json` (held in Cloudflare KV, not in this repository,
+   because chat ids are personal data and this repository is public).
+
+## Resources
+
+- https://docs.stripe.com/mcp
+- https://support.stripe.com
+- https://docs.stripe.com/keys-best-practices
+- `docs/RUNBOOK.md` — the paywall section, for how entitlement is decided
