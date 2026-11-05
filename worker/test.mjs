@@ -410,13 +410,15 @@ const queued = async (env) => {
     body.config,
     { BOT_TOKEN: true, OWNER_CHAT_ID: true, WEBHOOK_SECRET: true,
       DRAIN_SECRET: true, LIST_URL: true, QUEUE: true,
-      STRIPE_WEBHOOK_SECRET: false, PAY_URL: false, COMP_CODES: false });
+      STRIPE_WEBHOOK_SECRET: false, PAY_URL: false, COMP_CODES: false,
+      STRIPE_SECRET_KEY: false, STRIPE_PRICE_ID: false });
   // The paywall arrived after the rest of this Worker. A health check that
   // reads "not ok" for months before anyone sets up Stripe is one people stop
   // reading, so an absent Stripe secret is reported and not counted against it.
   expect("the paywall's own variables are reported without failing health",
     [body.ok, body.unconfigured],
-    [true, ["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES"]]);
+    [true, ["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
+            "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]]);
   expect("health never echoes a secret value",
     JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
   // A cached diagnostic reports a state that may be minutes old and is
@@ -828,6 +830,145 @@ for (const bad of ["/promo NOPE", "/promo", "/promo FRIEND", "/promo  "]) {
   const t = sent.find((s) => s.body.chat_id === STRANGER).body.text;
   expect("a link that already has a query gets & rather than a second ?",
     t.includes(`?utm=tg&client_reference_id=${STRANGER}`), true);
+}
+
+
+// ---------------------------------------------------------------------------
+// Checkout Session (Checkout Studio)
+//
+// The fixed_by_ui parameters are asserted one by one, because a silently
+// dropped one is the failure mode: Stripe accepts the call, the session
+// works, and the setting the user chose in the UI is simply not in effect.
+// ---------------------------------------------------------------------------
+
+/** Capture the form Stripe would have been sent. */
+function stripeApiHarness(env) {
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, init) => {
+    if (String(u).includes("api.stripe.com")) {
+      seen.push({ url: String(u), init,
+                  form: new URLSearchParams(init.body) });
+      return new Response(JSON.stringify({
+        id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1",
+      }), { headers: { "content-type": "application/json" } });
+    }
+    return realFetch(u, init);
+  };
+  return seen;
+}
+
+{
+  const env = harness();
+  const r = await worker.fetch(new Request("https://w.test/create-checkout-session",
+    { method: "POST" }), env);
+  expect("without STRIPE_SECRET_KEY the route does not exist", r.status, 404);
+}
+
+{
+  const env = harness();
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  const seen = stripeApiHarness(env);
+  const r = await worker.fetch(new Request(
+    "https://w.test/create-checkout-session",
+    { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: FRIEND }) }), env);
+  const body = await r.json();
+  expect("a session is created and its URL returned",
+    [r.status, body.url], [200, "https://checkout.stripe.com/c/pay/cs_test_1"]);
+  expect("called with the secret key, form-encoded",
+    [seen.length,
+     seen[0].init.headers.authorization,
+     seen[0].init.headers["content-type"]],
+    [1, "Bearer sk_test_x", "application/x-www-form-urlencoded"]);
+
+  const f = seen[0].form;
+  // Every fixed_by_ui value from Checkout Studio, checked individually.
+  for (const [k, v] of [
+    ["ui_mode", "hosted_page"],
+    ["billing_address_collection", "auto"],
+    ["phone_number_collection[enabled]", "false"],
+    ["automatic_tax[enabled]", "false"],
+    ["allow_promotion_codes", "true"],
+    ["payment_method_collection", "always"],
+    ["submit_type", "auto"],
+    ["saved_payment_method_options[payment_method_save]", "enabled"],
+    ["integration_identifier", "hosted_web_0001"],
+    ["origin_context", "web"],
+  ]) {
+    expect(`fixed_by_ui ${k} = ${v}`, f.get(k), v);
+  }
+
+  // The briefing is an annual subscription, and payment_method_collection is
+  // only valid in that mode.
+  expect("mode matches the product: a recurring subscription",
+    f.get("mode"), "subscription");
+
+  // Not from Checkout Studio, and the one field without which a completed
+  // payment cannot be attributed to a Telegram chat at all.
+  expect("the chat id travels as client_reference_id",
+    f.get("client_reference_id"), String(FRIEND));
+
+  expect("the success URL keeps Stripe's session-id template",
+    /\{CHECKOUT_SESSION_ID\}/.test(f.get("success_url")), true);
+  expect("a single line item, quantity one",
+    [f.get("line_items[0][quantity]"), f.has("line_items[0][price]")], ["1", true]);
+}
+
+{
+  // chat_id may also arrive as a query parameter.
+  const env = harness();
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  const seen = stripeApiHarness(env);
+  await worker.fetch(new Request(
+    `https://w.test/create-checkout-session?chat_id=${STRANGER}`,
+    { method: "POST" }), env);
+  expect("chat_id is accepted from the query string too",
+    seen[0].form.get("client_reference_id"), String(STRANGER));
+}
+
+{
+  // Real values must override the placeholders rather than sitting beside them.
+  const env = harness();
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  env.STRIPE_PRICE_ID = "price_1RealOne";
+  env.CHECKOUT_SUCCESS_URL = "https://t.me/mybot";
+  env.CHECKOUT_CANCEL_URL = "https://t.me/mybot";
+  const seen = stripeApiHarness(env);
+  await worker.fetch(new Request("https://w.test/create-checkout-session",
+    { method: "POST" }), env);
+  const f = seen[0].form;
+  expect("a configured price replaces the placeholder",
+    f.get("line_items[0][price]"), "price_1RealOne");
+  expect("and the configured success URL is used, template intact",
+    f.get("success_url"), "https://t.me/mybot?session_id={CHECKOUT_SESSION_ID}");
+  expect("and the configured cancel URL is used",
+    f.get("cancel_url"), "https://t.me/mybot");
+}
+
+{
+  // Stripe refusing the call must not look like success.
+  const env = harness();
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, init) => {
+    if (String(u).includes("api.stripe.com")) {
+      return new Response(JSON.stringify({
+        error: { message: "No such price: 'price_...'" },
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return realFetch(u, init);
+  };
+  const r = await worker.fetch(new Request("https://w.test/create-checkout-session",
+    { method: "POST" }), env);
+  expect("a refusal from Stripe is surfaced, not swallowed", r.status, 502);
+}
+
+{
+  const env = harness();
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  const r = await worker.fetch(new Request("https://w.test/create-checkout-session"), env);
+  expect("GET is not a route", r.status, 404);
 }
 
 console.log(`\n${failures} failure(s)`);
