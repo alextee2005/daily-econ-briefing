@@ -7,27 +7,43 @@ source of truth for what is left to do.
 repository, so one was added. Nothing else was changed: the webhook handler,
 secret loading and subscriber bookkeeping already existed and were left alone.
 
-## Read this first
+## Decision taken: the Payment Link
 
-This repository already accepts Stripe payments through a **dashboard Payment
-Link**, not an API call. That was a deliberate choice: the link carries
-`?client_reference_id=<telegram chat id>` and the Worker only *verifies*
-webhooks, so no key capable of moving money has ever lived there.
+**5 November 2026 — the Payment Link is the live path.** The Checkout Session
+route added for Checkout Studio stays in the code but **dormant**: without
+`STRIPE_SECRET_KEY` it returns 404, exactly as an unknown path does.
 
-The Checkout Session route added here needs `STRIPE_SECRET_KEY` on the Worker,
-which reverses that. Both routes raise the same `checkout.session.completed`
-event and the existing `/stripe` handler serves both, so nothing downstream
-changed — but you now have two ways to pay, and you should pick one:
+That is the simpler half of the fork, and deliberately so: no key capable of
+moving money lives in the Worker, which only verifies webhooks. It needs
+**three** variables rather than nine.
 
-| | Payment Link (already working) | Checkout Session (added here) |
+| Variable | Where | Needed? |
 |---|---|---|
-| Secret key in the Worker | no | **yes, required** |
-| Checkout Studio settings | not applied | applied |
-| Per-session control | none | full |
-| Status | live once `PAY_URL` is set | inert until `STRIPE_SECRET_KEY` is set |
+| `PAY_URL` | Cloudflare | **yes** — the Payment Link itself |
+| `STRIPE_WEBHOOK_SECRET` | Cloudflare | **yes** — or payments are never recorded |
+| `STRIPE_PAY_URL` | GitHub | **yes, last** — starts enforcing at delivery |
+| `PORTAL_URL` | Cloudflare | recommended — lets subscribers cancel themselves |
+| `COMP_CODES` | Cloudflare | optional — free comp codes |
+| `STRIPE_SECRET_KEY` | Cloudflare | no |
+| `STRIPE_PRICE_ID` | Cloudflare | no — Checkout Session only |
+| `CHECKOUT_SUCCESS_URL` | Cloudflare | no — Checkout Session only |
+| `CHECKOUT_CANCEL_URL` | Cloudflare | no — Checkout Session only |
+| `PORTAL_RETURN_URL` | Cloudflare | no — portal sessions only |
 
-**Neither is switched on right now.** The route 404s without
-`STRIPE_SECRET_KEY`, exactly as an unknown path does.
+### What skipping the secret key costs
+
+One thing, and it is acceptable: the customer portal link becomes the
+**login page** rather than a one-time deep link, so a subscriber types their
+email and Stripe sends them a magic link. The deep-link version needs
+`STRIPE_SECRET_KEY`. Everything else is identical.
+
+### The trap that will catch you
+
+**Test mode and live mode are separate worlds.** The Payment Link is a
+different URL and the webhook signing secret is a different value. Going live
+is not a toggle — it means creating the link and the webhook again in live
+mode and replacing both variables. Nothing warns you: a live payment against
+a test-mode secret simply fails signature verification and is never recorded.
 
 ## Values to Replace
 
@@ -104,13 +120,18 @@ Settings → **Variables and Secrets**. Note the trap this project has hit
 before: *Settings → Build → Build variables* is build-time only and invisible
 to the Worker. Use **Variables and Secrets**, then **Deploy**.
 
+For the Payment Link path:
+
 | Name | Type | Purpose |
 |---|---|---|
-| `STRIPE_SECRET_KEY` | Secret | `sk_test_…` then `sk_live_…`. **Setting this activates the route.** |
-| `STRIPE_PRICE_ID` | Text | Your $4.99/year Price ID |
-| `CHECKOUT_SUCCESS_URL` | Text | e.g. `https://t.me/your_bot` |
-| `CHECKOUT_CANCEL_URL` | Text | e.g. `https://t.me/your_bot` |
-| `STRIPE_WEBHOOK_SECRET` | Secret | **already documented** — `whsec_…`, for `/stripe` |
+| `PAY_URL` | Text | The Payment Link URL. The bot appends `?client_reference_id=<chat id>` |
+| `STRIPE_WEBHOOK_SECRET` | Secret | `whsec_…` from the webhook endpoint, for `/stripe` |
+| `PORTAL_URL` | Text | The customer portal login page |
+| `COMP_CODES` | Text | Optional, e.g. `FRIENDS:1, PRESS:2` |
+
+The Checkout Session variables (`STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`,
+`CHECKOUT_SUCCESS_URL`, `CHECKOUT_CANCEL_URL`) are **not needed** and should be
+left unset, which keeps that route dormant.
 
 Never commit a key. This repository is public and has no `.env` by design:
 secrets live in GitHub Actions secrets and Cloudflare Worker variables. See
@@ -190,9 +211,8 @@ Run the suites with `node worker/test.mjs` and
 
 ## Next steps
 
-1. **Decide: Payment Link or Checkout Session.** Running both means two paths
-   to maintain for one product.
-2. Set the four Worker variables above and **Deploy**.
+1. ~~Decide: Payment Link or Checkout Session.~~ **Done — Payment Link.**
+2. Set `PAY_URL`, `STRIPE_WEBHOOK_SECRET` and `PORTAL_URL`, then **Deploy**.
 3. Point a Stripe webhook at `<worker>/stripe` if you have not already, and
    paste its signing secret into `STRIPE_WEBHOOK_SECRET`.
 4. Test with a test-mode card end to end, through to the entitlement table.
