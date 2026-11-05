@@ -33,12 +33,29 @@ on:
         required: false
         default: ""
 
-permissions: {}
+# contents: read, not {}, because the "commands" action reads the command table
+# out of scripts/subscribers.py and so needs the repository. The other three
+# actions talk only to Telegram's API and would still be happy with nothing.
+permissions:
+  contents: read
 
 jobs:
   webhook:
     runs-on: ubuntu-latest
     steps:
+      # Only "commands" needs the repository; point, check and unpoint are pure
+      # API calls and stay that way. Its absence is what broke runs 6 and 7:
+      # the step called scripts/subscribers.py in a workspace that held no
+      # checkout, so python3 exited 2 with "No such file or directory".
+      - name: Check out repository
+        if: inputs.action == 'commands'
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: inputs.action == 'commands'
+        with:
+          python-version: "3.12"
+
       - name: ${{ inputs.action }}
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

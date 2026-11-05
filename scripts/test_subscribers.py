@@ -1100,5 +1100,30 @@ expect("the owner is still told the real pending id, privately",
 expect("and the reply is addressed to a real chat id, or it goes nowhere",
        [r["chat_id"] for r in told], [OWNER])
 
+# --- a workflow that runs a repo script must check the repo out -------------
+# telegram-webhook.yml was a pure Telegram-API workflow with no checkout, and
+# gained a step calling scripts/subscribers.py. Two runs failed with
+# "python3: can't open file .../scripts/subscribers.py" before anyone noticed,
+# because nothing connects "this step needs the repository" to "this job
+# fetches it". Checked as text rather than parsed YAML so the suite keeps
+# needing nothing but the standard library.
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github/workflows"
+if WORKFLOWS.is_dir():
+    missing = []
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        body = wf.read_text(encoding="utf-8")
+        # Only lines that look like a command, so a mention in a comment or in
+        # a path filter such as 'scripts/**' does not demand a checkout.
+        uses_script = any(
+            "scripts/" in ln and not ln.lstrip().startswith("#")
+            and ("python3 " in ln or "bash " in ln or "./scripts/" in ln)
+            for ln in body.splitlines())
+        if uses_script and "actions/checkout" not in body:
+            missing.append(wf.name)
+    expect("every workflow that runs a repo script checks the repo out",
+           missing, [])
+else:
+    print("SKIP  .github/workflows not present")
+
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)
