@@ -289,7 +289,8 @@ expect("every outcome the code can produce has a message",
 # the notices sweep. Grouped rather than listed one by one, but still an
 # exhaustive check: a key that belongs to neither set is a typo nobody sends.
 PAYWALL_MSG = {"paid", "cancelled", "trial", "signed-up", "pay", "lapsed",
-               "reminder", "comp-applied", "comp-bad"}
+               "reminder", "comp-applied", "comp-bad",
+               "portal", "stopped-billing", "portal-unavailable"}
 expect("every message is either a spoken outcome or paywall wording",
        sorted(set(MSG) - SPOKEN - PAYWALL_MSG), [])
 

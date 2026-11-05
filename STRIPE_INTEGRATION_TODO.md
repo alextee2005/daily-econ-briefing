@@ -198,13 +198,62 @@ Run the suites with `node worker/test.mjs` and
 4. Test with a test-mode card end to end, through to the entitlement table.
 5. Switch to live keys, and set `STRIPE_PAY_URL` in GitHub secrets — **that is
    the step that starts enforcing the paywall at delivery.**
-6. **Enable the Stripe customer portal.** This is a real gap, not a nicety:
-   `/stop` removes someone from the delivery list but cannot cancel their
-   subscription, so until a portal link exists an opt-out keeps being charged
-   unless you cancel it in the dashboard yourself.
+6. **Turn the customer portal on in Stripe.** The code side is done — see
+   *Customer portal* below — but it cannot work until you enable the portal in
+   your own dashboard, which is not something this repository can do for you.
 7. Fulfilment and order tracking already exist — payments become entitlement
    in `subscribers.json` (held in Cloudflare KV, not in this repository,
    because chat ids are personal data and this repository is public).
+
+## Customer portal
+
+`/stop` takes someone off the delivery list but **cannot cancel what Stripe is
+charging them**. Without a portal they stop receiving the briefing and keep
+paying for it — the worst of both, and not something they can fix themselves.
+That is now handled, in two ways, best first:
+
+1. **A billing portal session**, created through the API for the chat's stored
+   `stripe_customer_id`. A one-time deep link: they land straight in their own
+   subscription, no email step. Needs `STRIPE_SECRET_KEY`, which the Checkout
+   route already requires.
+2. **`PORTAL_URL`** — the shareable login page from the dashboard. No key
+   needed, but it asks for their email and sends a magic link, so it is the
+   fallback.
+
+With neither configured, nothing is sent and **the owner is messaged to cancel
+it by hand**. That is the old behaviour, kept as the floor so a missing
+variable degrades rather than misleads.
+
+### What you have to do in Stripe
+
+This part is yours — the dashboard cannot be changed from here.
+
+1. https://dashboard.stripe.com/settings/billing/portal
+2. Under **Functionality**, allow customers to **cancel subscriptions** (and
+   update payment methods, which is the other reason they would open it).
+3. **Save**. That alone makes option 1 work, since the API needs a saved
+   portal configuration — until it exists, Stripe refuses the session with
+   *"No configuration provided"* and the code falls back.
+4. Optional: copy the **login page** link from the same screen into the Worker
+   variable `PORTAL_URL`, as the fallback for anyone without a stored customer
+   id.
+
+### Worker variables
+
+| Name | Type | Purpose |
+|---|---|---|
+| `PORTAL_URL` | Text | Shareable login page, used when no session can be created |
+| `PORTAL_RETURN_URL` | Text | Where Stripe sends them when finished — your bot link, e.g. `https://t.me/your_bot`. This project has no web pages. |
+
+### What a subscriber can do
+
+| Command | Effect |
+|---|---|
+| `/manage` or `/billing` | Portal link. Update a card or cancel, without unsubscribing |
+| `/stop` | Removes them from delivery **and**, if there is a live subscription, includes the cancel link |
+
+A trial or a comped subscriber is not offered a portal: there is no money
+behind either, so there is nothing to cancel.
 
 ## Resources
 

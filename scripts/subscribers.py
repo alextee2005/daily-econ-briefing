@@ -102,6 +102,19 @@ MSG = {
                      "Thank you."),
     "comp-bad": ("That code is not valid. If you think it should be, reply and "
                  "the owner will take a look."),
+
+    # --- billing self-service ----------------------------------------------
+    # Removing someone from the delivery list does not cancel what Stripe is
+    # charging them. Without these they would stop receiving the briefing and
+    # keep paying for it, which is the worst of both.
+    "portal": ("Manage your subscription — update your card, see invoices, "
+               "or cancel: {link}"),
+    "stopped-billing": ("We have received your unsubscribe request. Please give "
+                        "us time to process it. Your subscription is still "
+                        "active with Stripe, so cancel it here to stop being "
+                        "billed: {link}"),
+    "portal-unavailable": ("I could not open the billing page just now. Reply "
+                           "here and the owner will cancel it for you."),
 }
 
 
