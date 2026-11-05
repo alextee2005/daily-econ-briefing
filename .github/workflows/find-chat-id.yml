@@ -232,14 +232,22 @@ jobs:
           # exists to answer, and a failed run is exactly when it is asked.
           COUNT=$(python3 scripts/subscribers.py recipients 2>/dev/null | wc -l)
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, os, pathlib
+          import json, os, pathlib, sys
+          # mask() rather than a local copy: this page is public, and a second
+          # implementation of "what is safe to print" is one that drifts.
+          sys.path.insert(0, "scripts")
+          from subscribers import mask
           p = pathlib.Path("subscribers.json")
           d = json.loads(p.read_text()) if p.is_file() else {}
           owner = (os.environ.get("OWNER_CHAT_ID") or "").strip()
 
           def row(key, label):
+              # Masked: this table used to publish the whole delivery list on
+              # every run. Chat ids are the personal data that moving the list
+              # to KV existed to protect, and a run summary on a public
+              # repository is as public as the repository.
               n = len(d.get(key) or [])
-              who = ", ".join(f"`{e['chat_id']}`" for e in (d.get(key) or [])) or "—"
+              who = ", ".join(f"`{mask(e['chat_id'])}`" for e in (d.get(key) or [])) or "—"
               return f"| {label} | {n} | {who} |"
 
           print("## Briefing delivery list\n")
@@ -263,8 +271,10 @@ jobs:
               print("The owner's chat ID comes from the `TELEGRAM_CHAT_ID` secret and is "
                     "deliberately not listed here.\n")
           if d.get("pending"):
-              print("To enrol someone, re-run this workflow with their id in the "
-                    "`approve` input — or reply `/approve <id>` to the bot, which the "
-                    "next briefing run applies.")
+              print("Ids are shown masked, because this page is public. Send the bot "
+                    "`/pending` to get the full ids in your own chat. To enrol "
+                    "someone, re-run this workflow with their id in the `approve` "
+                    "input — or reply `/approve <id>` to the bot, which the next "
+                    "briefing run applies.")
           PY
           echo "Recipients for the next edition: ${COUNT}"

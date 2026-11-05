@@ -997,5 +997,133 @@ if DELIVER.is_file():
 else:
     print("SKIP  .github/workflows/deliver.yml not present")
 
+# --- chat ids must not reach a public log ----------------------------------
+# This repository is public, and so is every Actions log and run summary it
+# produces. Chat ids are the personal data that moving the list to KV existed
+# to protect, so an id printed by this script is published just as surely as
+# one committed to git — which is what the KV move was for.
+#
+# Tested through subprocesses rather than by calling the functions, because
+# what is being asserted is a property of the process's streams: who gets the
+# real id and who gets a masked one. Calling scrub() directly would prove only
+# that a regex works.
+import os
+import pathlib
+import subprocess
+
+SCRIPT = Path(__file__).resolve().parent / "subscribers.py"
+ID_SHAPED = re.compile(r"\d{6,}")
+
+expect("mask keeps enough of an id to tell two chats apart",
+       (subscribers.mask(1234567890), subscribers.mask(9876543210)), ("…890", "…210"))
+# Six digits, not four: a date, a port or a count must survive, or every log
+# line becomes unreadable in exchange for nothing.
+expect("scrub masks ids and leaves dates, ports and counts alone",
+       subscribers.scrub("1234567890 paid on 2026-11-05 (port 8080, 3 left)"),
+       "…890 paid on 2026-11-05 (port 8080, 3 left)")
+expect("scrub keeps a group id's sign, since the digits are the identifier",
+       subscribers.scrub("chat -1001234567890"), "chat -…890")
+
+# recall_message.py carries its own mask() — it is standalone tooling and
+# importing this module for three lines would be worse coupling than the
+# duplication. Pinned here instead, because two answers to "what is safe to
+# print" is the thing the masking exists to avoid.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from recall_message import mask as recall_mask
+except Exception as exc:                                  # pragma: no cover
+    print(f"SKIP  recall_message not importable ({exc})")
+else:
+    expect("both mask() definitions agree, so neither can drift",
+           [recall_mask(i) for i in (1234567890, 9876543210, 42)],
+           [subscribers.mask(i) for i in (1234567890, 9876543210, 42)])
+
+
+def run(action, *args, store=None, env=None, summary=None):
+    """Run the CLI as a workflow does and return (stdout, stderr, summary)."""
+    d = pathlib.Path(tempfile.mkdtemp())
+    sp = d / "store.json"
+    sp.write_text(json.dumps(store if store is not None else fresh()))
+    sum_path = d / "summary.md"
+    e = {"OWNER_CHAT_ID": str(OWNER), "PATH": os.environ.get("PATH", "")}
+    if summary:
+        e["GITHUB_STEP_SUMMARY"] = str(sum_path)
+    e.update(env or {})
+    r = subprocess.run([sys.executable, str(SCRIPT), action, *args,
+                        "--store", str(sp)],
+                       capture_output=True, text=True, env=e, cwd=str(SCRIPT.parent))
+    return (r.stdout, r.stderr,
+            sum_path.read_text() if summary and sum_path.is_file() else "")
+
+
+PAYER, WAITING = 1234567890, 5556667778
+LISTED = {"approved": [{"chat_id": OWNER, "type": "private"},
+                       {"chat_id": PAYER, "type": "private"}],
+          "pending": [{"chat_id": WAITING, "type": "private", "seen": "2026-11-01"}],
+          "unsubscribed": [], "last_update_id": 0}
+
+# The one that would cost a subscriber their briefing: deliver.yml reads these
+# ids with mapfile to address the sends, so masking them delivers to nobody.
+out, _, _ = run("recipients", store=LISTED)
+expect("recipients keeps real ids on stdout, or delivery addresses nobody",
+       sorted(out.split()), sorted([str(OWNER), str(PAYER)]))
+
+# And the leak itself: the same ids through a human-readable action.
+qd = pathlib.Path(tempfile.mkdtemp()) / "q.json"
+qd.write_text(json.dumps({"items": [{"id": "q1", "verb": "start",
+                                     "chat_id": WAITING}]}))
+out, err, summary = run("drain", "--updates", str(qd), store=LISTED, summary=True)
+expect("drain prints no id-shaped run to the log",
+       ID_SHAPED.findall(out + err), [])
+expect("and none into the run summary either",
+       ID_SHAPED.findall(summary), [])
+expect("while still saying which chat it was, masked",
+       "…778" in out, True)
+
+# The owner's own route to a real id must survive, or approving becomes
+# impossible: it goes to their private chat, never to the log.
+upd = pathlib.Path(tempfile.mkdtemp()) / "u.json"
+upd.write_text(json.dumps({"ok": True, "result": [
+    {"update_id": 1, "message": {"message_id": 1, "date": 1, "text": "/pending",
+     "chat": {"id": OWNER, "type": "private", "first_name": "Owner"},
+     "from": {"id": OWNER, "first_name": "Owner"}}}]}))
+rep = pathlib.Path(tempfile.mkdtemp()) / "r.json"
+out, err, summary = run("process", "--updates", str(upd), "--replies", str(rep),
+                        store=LISTED, summary=True)
+expect("process prints no id-shaped run to the log",
+       ID_SHAPED.findall(out + err), [])
+expect("nor into the run summary", ID_SHAPED.findall(summary), [])
+told = json.loads(rep.read_text())
+owner_msg = next((r for r in told if r["outcome"] == "owner-pending"), None)
+expect("the owner is still told the real pending id, privately",
+       owner_msg is not None and str(WAITING) in owner_msg["text"], True)
+expect("and the reply is addressed to a real chat id, or it goes nowhere",
+       [r["chat_id"] for r in told], [OWNER])
+
+# --- a workflow that runs a repo script must check the repo out -------------
+# telegram-webhook.yml was a pure Telegram-API workflow with no checkout, and
+# gained a step calling scripts/subscribers.py. Two runs failed with
+# "python3: can't open file .../scripts/subscribers.py" before anyone noticed,
+# because nothing connects "this step needs the repository" to "this job
+# fetches it". Checked as text rather than parsed YAML so the suite keeps
+# needing nothing but the standard library.
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github/workflows"
+if WORKFLOWS.is_dir():
+    missing = []
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        body = wf.read_text(encoding="utf-8")
+        # Only lines that look like a command, so a mention in a comment or in
+        # a path filter such as 'scripts/**' does not demand a checkout.
+        uses_script = any(
+            "scripts/" in ln and not ln.lstrip().startswith("#")
+            and ("python3 " in ln or "bash " in ln or "./scripts/" in ln)
+            for ln in body.splitlines())
+        if uses_script and "actions/checkout" not in body:
+            missing.append(wf.name)
+    expect("every workflow that runs a repo script checks the repo out",
+           missing, [])
+else:
+    print("SKIP  .github/workflows not present")
+
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

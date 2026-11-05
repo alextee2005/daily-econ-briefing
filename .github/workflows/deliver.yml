@@ -160,13 +160,13 @@ jobs:
           # writes the ids to acknowledge, and under the webhook the Worker
           # already replied to each person when it queued the decision.
           #
-          # It does, however, name chat ids — in its stdout ("<id>: awaiting
-          # approval") and in a GITHUB_STEP_SUMMARY block. This repository is
-          # public and so are its logs, and chat ids are the personal data the
-          # move to KV existed to protect, so neither is let through as-is: the
-          # step summary is discarded, and every run of six or more digits in the
-          # output is reduced to its last three. Six, not four, so that dates
-          # survive; the ids are nine or ten.
+          # subscribers.py now masks chat ids on the way out of the process,
+          # so its stdout is already safe. The two guards below are kept as a
+          # second line of defence rather than the only one: a raw id could
+          # still reach this log through a traceback, or through a print added
+          # later by someone who has not read that module's header. The step
+          # summary is discarded because deliver.yml writes its own, not
+          # because the drain's is unsafe.
           if ! GITHUB_STEP_SUMMARY=/dev/null \
                python3 scripts/subscribers.py drain \
                  --updates /tmp/queue.json --replies /tmp/ack.json \
