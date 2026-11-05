@@ -416,6 +416,27 @@ opposite responses.
 5. Set `STRIPE_PAY_URL` in GitHub secrets. **This is the step that starts
    enforcing** — do it last.
 
+### The autocomplete menu
+
+Telegram shows a command menu only if the bot has been told what it is.
+Actions → **Point the Telegram webhook at the Worker** → `commands`.
+
+It publishes two scopes: a public one, and a chat-scoped one for the owner, so
+subscribers are never shown the four owner commands that would refuse them.
+
+Whether `/promo` and `/manage` are listed is **asked, not assumed** — the run
+reads the Worker's `/health` and looks at `config.PAY_URL`. Both commands
+return without replying until that variable is set, and a menu entry for a
+command that answers nothing is worse than no entry.
+
+**So re-run it after setting `PAY_URL`**, or the menu keeps hiding two
+commands that now work. Nothing reminds you; the run says so in its own log,
+which you will not be reading at that point.
+
+Aliases are deliberately left out of the menu: `/subscribe`, `/unsubscribe`
+and `/billing` keep working, but three ways to do one thing in a six-item
+menu reads as three features.
+
 ### Cancellation
 
 `/stop` removes someone from the delivery list, and that on its own does not

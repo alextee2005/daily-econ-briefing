@@ -933,6 +933,50 @@ with tempfile.TemporaryDirectory() as td:
             222: ("2026-12-01", "paid", None),
             333: (None, None, "2026-11-01")})
 
+# --- the Telegram autocomplete menu ----------------------------------------
+# Telegram enforces the command format, and a rejected setMyCommands fails the
+# whole call rather than dropping the bad entry — so the shape is pinned here
+# rather than discovered in a workflow run.
+import re as _re  # noqa: E402
+
+PUBLIC_OFF = subscribers.bot_commands(paywall=False, owner=False)
+PUBLIC_ON = subscribers.bot_commands(paywall=True, owner=False)
+OWNER_OFF = subscribers.bot_commands(paywall=False, owner=True)
+OWNER_ON = subscribers.bot_commands(paywall=True, owner=True)
+
+expect("with the paywall off the public menu is just start and stop",
+       [c["command"] for c in PUBLIC_OFF], ["start", "stop"])
+expect("and /promo and /manage appear once it is on",
+       [c["command"] for c in PUBLIC_ON], ["start", "stop", "promo", "manage"])
+expect("the owner's menu adds their four, and only to their scope",
+       [c["command"] for c in OWNER_OFF],
+       ["start", "stop", "approve", "deny", "pending", "status"])
+expect("no owner command ever reaches the public menu",
+       [c["command"] for c in PUBLIC_ON if c["command"] in
+        {"approve", "deny", "pending", "status"}], [])
+
+# A command that answers nothing must not be advertised. /promo and /manage
+# both return without replying until PAY_URL is set.
+expect("nothing inert is listed while the paywall is off",
+       [c["command"] for c in OWNER_OFF if c["command"] in {"promo", "manage"}], [])
+
+# Telegram's rules: 1-32 characters, lowercase letters, digits and
+# underscores, no leading slash; description 1-256 characters.
+for scope, items in [("public", PUBLIC_ON), ("owner", OWNER_ON)]:
+    bad = [c for c in items if not _re.fullmatch(r"[a-z0-9_]{1,32}", c["command"])]
+    expect(f"every {scope} command name is a form Telegram accepts", bad, [])
+    badd = [c["command"] for c in items
+            if not 1 <= len(c["description"]) <= 256]
+    expect(f"every {scope} description is within length", badd, [])
+
+# Every menu entry must be a command the bot actually answers, or the menu
+# offers people something that does nothing.
+KNOWN = ({c.lstrip("/") for c in subscribers.COMMANDS}
+         | {c.lstrip("/") for c in subscribers.OWNER_COMMANDS}
+         | {"promo", "manage"})   # Worker-only, no Python polling equivalent
+expect("every menu entry is a command the bot handles",
+       sorted({c["command"] for c in OWNER_ON} - KNOWN), [])
+
 # --- the delivery workflow must actually use the paywall -------------------
 # The model and the filter are useless if deliver.yml never passes --editions,
 # and that is a one-line omission nothing else would notice: delivery would

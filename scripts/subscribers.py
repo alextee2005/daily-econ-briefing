@@ -118,6 +118,49 @@ MSG = {
 }
 
 
+# The command menu Telegram shows, for setMyCommands. Kept here, beside
+# COMMANDS and OWNER_COMMANDS, so a command cannot be added to the bot without
+# its menu entry being one line away — and so the descriptions a subscriber
+# reads live next to the replies they get.
+#
+# Only canonical names are listed. /subscribe, /unsubscribe and /billing keep
+# working as aliases but are left out: three ways to do the same thing in one
+# menu reads as three different features.
+#
+# (command, description, owner_only, needs_paywall)
+BOT_COMMANDS = [
+    ("start", "Subscribe to the daily briefing", False, False),
+    ("stop", "Stop receiving the briefing", False, False),
+    ("promo", "Redeem a promo code", False, True),
+    ("manage", "Update your card, see invoices, or cancel", False, True),
+    ("approve", "Owner: approve a chat by id", True, False),
+    ("deny", "Owner: deny or remove a chat by id", True, False),
+    ("pending", "Owner: list chats awaiting approval", True, False),
+    ("status", "Owner: subscriber counts", True, False),
+]
+
+
+def bot_commands(paywall: bool = False, owner: bool = False) -> list:
+    """Menu entries for one Telegram scope.
+
+    `paywall` leaves out /promo and /manage until PAY_URL is set, because both
+    return without replying until then — and a menu entry for a command that
+    answers nothing is worse than no entry at all.
+
+    `owner` adds the owner's four. They go in a chat-scoped list rather than
+    the default one, so subscribers are not shown commands that would refuse
+    them.
+    """
+    out = []
+    for name, desc, owner_only, needs_paywall in BOT_COMMANDS:
+        if owner_only and not owner:
+            continue
+        if needs_paywall and not paywall:
+            continue
+        out.append({"command": name, "description": desc})
+    return out
+
+
 def fill(outcome: str, **kw) -> str:
     """A message with its placeholders filled.
 
@@ -909,7 +952,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("action",
                     choices=["sync", "process", "drain", "approve", "remove",
-                             "recipients", "grandfather", "notices"])
+                             "recipients", "grandfather", "notices",
+                             "commands"])
     ap.add_argument("targets", nargs="?", default="", help="chat ids, comma or space separated")
     ap.add_argument("--updates", help="a getUpdates JSON payload (sync, process)")
     ap.add_argument("--replies", help="write the confirmations to send here (process)")
@@ -919,6 +963,8 @@ def main() -> int:
                          "the paywall. Without it every approved chat is "
                          "returned, as before the paywall existed.")
     ap.add_argument("--today", default="", help="override today's date (testing)")
+    ap.add_argument("--paywall", action="store_true",
+                    help="include the commands that only work once PAY_URL is set")
     ap.add_argument("--report", default="",
                     help="write the per-chat entitlement table here (recipients)")
     args = ap.parse_args()
@@ -926,6 +972,15 @@ def main() -> int:
     store = Path(args.store)
     data = load(store)
     owner = owner_id()
+
+    if args.action == "commands":
+        # Both scopes at once, so the caller cannot set one and forget the
+        # other and leave the owner's menu out of step with the public one.
+        print(json.dumps({
+            "default": bot_commands(paywall=args.paywall, owner=False),
+            "owner": bot_commands(paywall=args.paywall, owner=True),
+        }, indent=2))
+        return 0
 
     if args.action == "notices":
         today = date.fromisoformat(args.today) if args.today else date.today()
