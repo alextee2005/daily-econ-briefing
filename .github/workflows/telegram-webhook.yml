@@ -26,7 +26,7 @@ on:
       action:
         description: "What to do"
         type: choice
-        options: [check, point, unpoint]
+        options: [check, point, unpoint, commands]
         default: check
       worker_url:
         description: "Worker URL, e.g. https://econ-briefing-bot.you.workers.dev (for 'point')"
@@ -49,6 +49,8 @@ jobs:
           HOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
           WORKER: ${{ inputs.worker_url }}
           ACTION: ${{ inputs.action }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
         run: |
           set -uo pipefail
 
@@ -161,6 +163,54 @@ jobs:
               echo "— which now returns nothing, because the webhook has taken over. People"
               echo "will still get instant replies from the Worker; the committed list just"
               echo "will not move until you add it."
+              ;;
+
+            commands)
+              # Publishes the autocomplete menu with setMyCommands, in two scopes: a
+              # public one, and a chat-scoped one for the owner so subscribers are
+              # never shown commands that would refuse them.
+              #
+              # Whether /promo and /manage appear depends on the Worker's PAY_URL,
+              # asked rather than guessed: both return without replying until it is
+              # set, and a menu entry for a command that answers nothing is worse
+              # than no entry. /health already reports it as a boolean.
+              PAYWALL=""
+              if [ -z "${DRAIN_URL:-}" ]; then
+                echo "TELEGRAM_DRAIN_URL is not set, so the paywall cannot be on yet."
+              elif ! curl -sS --max-time 20 "${DRAIN_URL%/}/health" -o /tmp/health.json; then
+                echo "::warning::Could not reach the Worker; assuming the paywall is off."
+              else
+                ON=$(jq -r '(.config.PAY_URL // false) | if . then "yes" else "no" end' \
+                      /tmp/health.json 2>/dev/null || echo unknown)
+                case "$ON" in
+                  yes) PAYWALL="--paywall"
+                       echo "The Worker has PAY_URL set: listing /promo and /manage." ;;
+                  no)  echo "The Worker has no PAY_URL: leaving /promo and /manage out." ;;
+                  *)   echo "::warning::/health was unreadable; assuming the paywall is off." ;;
+                esac
+              fi
+
+              python3 scripts/subscribers.py commands $PAYWALL > /tmp/cmds.json
+              echo "Publishing:"
+              jq -r 'to_entries[] | "  \(.key): " + ([.value[].command] | map("/" + .) | join(", "))' \
+                /tmp/cmds.json
+
+              api setMyCommands \
+                "$(jq -c '{commands: .default, scope: {type: "default"}}' /tmp/cmds.json)" \
+                && show || exit 1
+
+              if [ -n "${OWNER_CHAT_ID:-}" ]; then
+                api setMyCommands "$(jq -c --argjson c "$OWNER_CHAT_ID" \
+                  '{commands: .owner, scope: {type: "chat", chat_id: $c}}' /tmp/cmds.json)" \
+                  && show || exit 1
+              else
+                echo "::warning::TELEGRAM_CHAT_ID is not set, so the owner's own menu was"
+                echo "::warning::not published. The public one was."
+              fi
+
+              echo
+              echo "Re-run this after setting PAY_URL, or the menu keeps hiding /promo"
+              echo "and /manage even once they work."
               ;;
 
             unpoint)
