@@ -126,6 +126,7 @@ jobs:
           PDF: ${{ steps.pick.outputs.pdf }}
           EDITION_DATE: ${{ steps.pick.outputs.edition_date }}
           WHY: ${{ steps.pick.outputs.why }}
+          PAY_URL: ${{ secrets.STRIPE_PAY_URL }}
         run: |
           set -euo pipefail
 
@@ -135,11 +136,50 @@ jobs:
           fi
 
           # Owner first, then approved subscribers. One id per line.
-          mapfile -t RECIPIENTS < <(python3 scripts/subscribers.py recipients)
+          #
+          # The paywall is applied only when STRIPE_PAY_URL is set, and that
+          # gate is deliberately this way round rather than the other. The
+          # harmful misconfiguration is enforcing without selling: subscribers
+          # cut off with no link to pay. Keyed on the pay link, that state
+          # cannot arise — no link, no enforcement. The opposite slip (selling
+          # while still delivering to everyone) costs nothing but revenue and
+          # announces itself in the table below.
+          #
+          # --editions is what makes the trial countable: entitlement for a
+          # trial chat is computed from the editions committed since it
+          # started, not from a counter, so nothing here writes to the list.
+          if [ -n "${PAY_URL:-}" ]; then
+            mapfile -t RECIPIENTS < <(python3 scripts/subscribers.py recipients \
+              --editions editions --report /tmp/entitlement.md)
+            PAYWALL="on"
+          else
+            mapfile -t RECIPIENTS < <(python3 scripts/subscribers.py recipients)
+            PAYWALL="off"
+          fi
+
           if [ "${#RECIPIENTS[@]}" -eq 0 ]; then
             echo "::error::No recipients. Set TELEGRAM_CHAT_ID, or approve a subscriber"
             echo "::error::with the 'Find my Telegram chat ID' workflow."
             exit 1
+          fi
+
+          # The owner is never filtered, so a list of exactly one under an
+          # active paywall means every subscriber was excluded. That is either
+          # a genuinely empty paid list or the paywall misfiring, and the two
+          # need opposite responses — so say it loudly rather than letting a
+          # quiet "1 recipient" pass for normal.
+          APPROVED=$(python3 -c "
+          import json, pathlib
+          p = pathlib.Path('subscribers.json')
+          d = json.loads(p.read_text()) if p.is_file() else {}
+          print(len(d.get('approved') or []))
+          " 2>/dev/null || echo 0)
+          if [ "$PAYWALL" = "on" ] && [ "${#RECIPIENTS[@]}" -le 1 ] \
+             && [ "$APPROVED" -gt 0 ]; then
+            echo "::warning::The paywall excluded ALL ${APPROVED} subscriber(s);"
+            echo "::warning::only the owner is receiving this edition. If that is"
+            echo "::warning::not expected, check the entitlement table in the"
+            echo "::warning::summary before the next edition."
           fi
 
           # The parsed date, not the raw filename suffix: the early editions
@@ -282,6 +322,18 @@ jobs:
             fi
             echo
             echo "One upload plus $(( SENT > 0 ? SENT - 1 : 0 )) file_id reuse(s)."
+            if [ "$PAYWALL" = "on" ] && [ -s /tmp/entitlement.md ]; then
+              echo
+              echo "### Entitlement"
+              echo
+              # Every approved chat and why it did or did not receive this
+              # edition. A recipient count alone cannot tell "nobody has paid"
+              # from "the paywall is broken".
+              cat /tmp/entitlement.md
+            elif [ "$PAYWALL" = "off" ]; then
+              echo
+              echo "_Paywall off (no \`STRIPE_PAY_URL\`): every approved chat received this._"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "${#FAILED[@]}" -gt 0 ]; then
