@@ -411,14 +411,16 @@ const queued = async (env) => {
     { BOT_TOKEN: true, OWNER_CHAT_ID: true, WEBHOOK_SECRET: true,
       DRAIN_SECRET: true, LIST_URL: true, QUEUE: true,
       STRIPE_WEBHOOK_SECRET: false, PAY_URL: false, COMP_CODES: false,
-      STRIPE_SECRET_KEY: false, STRIPE_PRICE_ID: false });
+      STRIPE_SECRET_KEY: false, STRIPE_PRICE_ID: false,
+      PORTAL_URL: false, PORTAL_RETURN_URL: false });
   // The paywall arrived after the rest of this Worker. A health check that
   // reads "not ok" for months before anyone sets up Stripe is one people stop
   // reading, so an absent Stripe secret is reported and not counted against it.
   expect("the paywall's own variables are reported without failing health",
     [body.ok, body.unconfigured],
     [true, ["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
-            "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]]);
+            "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID",
+            "PORTAL_URL", "PORTAL_RETURN_URL"]]);
   expect("health never echoes a secret value",
     JSON.stringify(body).includes(env.WEBHOOK_SECRET), false);
   // A cached diagnostic reports a state that may be minutes old and is
@@ -969,6 +971,159 @@ function stripeApiHarness(env) {
   env.STRIPE_SECRET_KEY = "sk_test_x";
   const r = await worker.fetch(new Request("https://w.test/create-checkout-session"), env);
   expect("GET is not a route", r.status, 404);
+}
+
+
+// ---------------------------------------------------------------------------
+// Customer portal
+//
+// The point of this is that /stop must not leave somebody paying for a
+// briefing they no longer receive. Most of these cases are that one sentence.
+// ---------------------------------------------------------------------------
+
+/** Capture Stripe billing-portal calls and answer them. */
+function portalApiHarness(env, { ok = true } = {}) {
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, init) => {
+    if (String(u).includes("billing_portal/sessions")) {
+      seen.push(new URLSearchParams(init.body));
+      return ok
+        ? new Response(JSON.stringify({ url: "https://billing.stripe.com/session/xyz" }),
+            { headers: { "content-type": "application/json" } })
+        : new Response(JSON.stringify({ error: { message: "No configuration provided" } }),
+            { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return realFetch(u, init);
+  };
+  return seen;
+}
+
+const payingList = (extra = {}) => JSON.stringify({
+  approved: [{ chat_id: FRIEND, paid_until: "2027-11-03", plan: "paid",
+               stripe_customer_id: "cus_1", stripe_subscription_id: "sub_1",
+               ...extra }],
+  pending: [], unsubscribed: [],
+});
+
+// --- /stop with a live subscription ---------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  await env.QUEUE.put("list", payingList());
+  const seen = portalApiHarness(env);
+  await hook(env, msg(FRIEND, "/stop"));
+
+  expect("a portal session is created for the stored customer",
+    seen.map((f) => f.get("customer")), ["cus_1"]);
+  const t = sent.find((s) => s.body.chat_id === FRIEND).body.text;
+  expect("and the unsubscribe reply carries the cancel link",
+    [/still active with Stripe/.test(t),
+     t.includes("https://billing.stripe.com/session/xyz")], [true, true]);
+  expect("while the request itself is still honoured",
+    (await queued(env)).map((i) => i.verb), ["stop"]);
+}
+
+// --- /stop with no billing behind it --------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, trial_started: "2026-11-01" }],
+    pending: [], unsubscribed: [],
+  }));
+  const seen = portalApiHarness(env);
+  await hook(env, msg(FRIEND, "/stop"));
+  expect("a trial chat is not sent a billing link it has no use for",
+    [seen.length, /billing.stripe.com/.test(
+      sent.find((s) => s.body.chat_id === FRIEND).body.text)], [0, false]);
+}
+{
+  // A comp has no money behind it either, so there is nothing to cancel.
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  await env.QUEUE.put("list", JSON.stringify({
+    approved: [{ chat_id: FRIEND, paid_until: "2027-11-03", plan: "comp",
+                 stripe_customer_id: "cus_1" }],
+    pending: [], unsubscribed: [],
+  }));
+  const seen = portalApiHarness(env);
+  await hook(env, msg(FRIEND, "/stop"));
+  expect("a comped subscriber is not offered a portal", seen.length, 0);
+}
+
+// --- the case the subscriber cannot fix alone ------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;              // paywall on, but no key and no PORTAL_URL
+  await env.QUEUE.put("list", payingList());
+  await hook(env, msg(FRIEND, "/stop"));
+  expect("with no portal configured the owner is told to cancel it by hand",
+    sent.some((s) => String(s.body.chat_id) === String(OWNER) &&
+      /keep being charged/.test(s.body.text)), true);
+  expect("and the subscriber still gets the ordinary unsubscribe reply",
+    /give us time to process/.test(
+      sent.find((s) => s.body.chat_id === FRIEND).body.text), true);
+}
+
+// --- the login-page fallback ----------------------------------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.PORTAL_URL = "https://billing.stripe.com/p/login/abc";
+  await env.QUEUE.put("list", payingList());
+  await hook(env, msg(FRIEND, "/stop"));
+  const t = sent.find((s) => s.body.chat_id === FRIEND).body.text;
+  expect("with no secret key, the shareable login page is used instead",
+    t.includes("https://billing.stripe.com/p/login/abc"), true);
+  expect("and the owner is not pestered, since the subscriber can act",
+    sent.some((s) => String(s.body.chat_id) === String(OWNER)), false);
+}
+{
+  // A refused session must fall back rather than leaving them with nothing.
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  env.PORTAL_URL = "https://billing.stripe.com/p/login/abc";
+  await env.QUEUE.put("list", payingList());
+  portalApiHarness(env, { ok: false });
+  await hook(env, msg(FRIEND, "/stop"));
+  expect("a refused portal session falls back to the login page",
+    sent.find((s) => s.body.chat_id === FRIEND).body.text
+      .includes("/p/login/abc"), true);
+}
+
+// --- /manage, for a card change without unsubscribing ---------------------
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  env.PORTAL_RETURN_URL = "https://t.me/mybot";
+  await env.QUEUE.put("list", payingList());
+  const seen = portalApiHarness(env);
+  await hook(env, msg(FRIEND, "/manage"));
+  expect("/manage hands over the portal link", /Manage your subscription/.test(
+    sent.find((s) => s.body.chat_id === FRIEND).body.text), true);
+  expect("and does not unsubscribe anybody", (await queued(env)).length, 0);
+  expect("the return URL is passed through when configured",
+    seen[0].get("return_url"), "https://t.me/mybot");
+}
+{
+  const env = harness();
+  env.PAY_URL = PAY;
+  await env.QUEUE.put("list", payingList());
+  await hook(env, msg(FRIEND, "/billing"));
+  expect("/billing is the same command, and says so when unavailable",
+    /could not open the billing page/.test(
+      sent.find((s) => s.body.chat_id === FRIEND).body.text), true);
+}
+{
+  const env = harness();                       // paywall off
+  await hook(env, msg(FRIEND, "/manage"));
+  expect("with the paywall off, /manage does nothing", sent.length, 0);
 }
 
 console.log(`\n${failures} failure(s)`);

@@ -416,13 +416,27 @@ opposite responses.
 5. Set `STRIPE_PAY_URL` in GitHub secrets. **This is the step that starts
    enforcing** — do it last.
 
-### Cancellation is not self-service yet
+### Cancellation
 
-`/stop` removes someone from the list but **cannot cancel their Stripe
-subscription**: that needs a secret key in the Worker, which it deliberately
-does not have. Until a Stripe customer-portal link exists, someone who opts
-out keeps being charged unless you cancel it in Stripe yourself. The reminder
-wording tells them to send `/stop`; acting on it is manual.
+`/stop` removes someone from the delivery list, and that on its own does not
+cancel what Stripe is charging them — so a subscriber with live billing is
+also sent a customer-portal link in the same reply. `/manage` (or `/billing`)
+gives them the same link without unsubscribing, for a card change.
+
+The link is a one-time portal session created for their stored
+`stripe_customer_id` when `STRIPE_SECRET_KEY` is set; otherwise the
+`PORTAL_URL` login page; otherwise nothing is sent and **you are messaged to
+cancel it in the dashboard by hand**. That last case is the floor, so a
+missing variable degrades rather than misleading somebody into thinking the
+money has stopped.
+
+The portal must be enabled in Stripe itself before any of it works —
+https://dashboard.stripe.com/settings/billing/portal, allow cancellation,
+Save. Until that configuration is saved the API refuses the session with "No
+configuration provided" and the fallback takes over.
+
+A trial or comped subscriber is never offered a portal: there is no money
+behind either.
 
 ### Comp codes
 

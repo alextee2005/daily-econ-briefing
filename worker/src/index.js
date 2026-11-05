@@ -77,6 +77,19 @@ const MSG = {
   "comp-bad":
     "That code is not valid. If you think it should be, reply and " +
     "the owner will take a look.",
+
+
+  // Billing self-service. Same templates as scripts/subscribers.py.
+  portal:
+    "Manage your subscription — update your card, see invoices, or " +
+    "cancel: {link}",
+  "stopped-billing":
+    "We have received your unsubscribe request. Please give us time " +
+    "to process it. Your subscription is still active with Stripe, " +
+    "so cancel it here to stop being billed: {link}",
+  "portal-unavailable":
+    "I could not open the billing page just now. Reply here and the " +
+    "owner will cancel it for you.",
 };
 
 const START = new Set(["/start", "/subscribe"]);
@@ -86,7 +99,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-05a";
+const VERSION = "2026-11-05b";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -367,6 +380,82 @@ const decisionKeyboard = (chat_id) => ({
   },
 });
 
+// --- Stripe customer portal -------------------------------------------------
+//
+// Closes a real gap rather than adding polish. /stop takes somebody off the
+// delivery list but cannot cancel what Stripe is charging them, so without
+// this they stop receiving the briefing and keep paying for it — the worst of
+// both outcomes, and one the subscriber cannot fix themselves.
+//
+// Two ways to get there, best first:
+//
+//   1. A billing portal SESSION, created through the API for the stored
+//      stripe_customer_id. A one-time deep link: they land straight in their
+//      own subscription. Needs STRIPE_SECRET_KEY, which the Checkout route
+//      already requires.
+//   2. PORTAL_URL, the shareable login page configured in the Stripe
+//      dashboard. No key needed, but it asks for their email and sends a
+//      magic link, so it is the fallback rather than the default.
+//
+// With neither configured, nothing is sent and the owner is told to cancel it
+// by hand. That is the behaviour this change exists to replace, kept as the
+// floor so a missing variable degrades rather than misleads.
+async function portalFor(env, chatId) {
+  const customer = await customerForChat(env, chatId);
+
+  if (env.STRIPE_SECRET_KEY && customer) {
+    const f = new URLSearchParams({ customer });
+    // Where Stripe sends them when they are finished. The bot link is the
+    // only sensible destination: this project has no web pages.
+    if (env.PORTAL_RETURN_URL) f.set("return_url", env.PORTAL_RETURN_URL);
+    try {
+      const r = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: f.toString(),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.url) return { url: body.url, how: "session" };
+      console.warn("portal session refused:",
+        (body.error && body.error.message) || `HTTP ${r.status}`);
+    } catch (e) {
+      console.error("portal session failed", e && e.stack);
+    }
+  }
+
+  if (env.PORTAL_URL) return { url: env.PORTAL_URL, how: "login-page" };
+  return null;
+}
+
+/** The Stripe customer id recorded for a chat, from any of the three lists. */
+async function customerForChat(env, chatId) {
+  const { list } = await storedList(env);
+  for (const key of ["approved", "pending", "unsubscribed"]) {
+    for (const e of (list && list[key]) || []) {
+      if (e.chat_id === chatId && e.stripe_customer_id) return e.stripe_customer_id;
+    }
+  }
+  return null;
+}
+
+/** Does this chat have billing that outlives being removed from the list? */
+async function hasBilling(env, chatId) {
+  const { list } = await storedList(env);
+  for (const key of ["approved", "pending", "unsubscribed"]) {
+    for (const e of (list && list[key]) || []) {
+      if (e.chat_id !== chatId) continue;
+      // A comp has no money behind it, so there is nothing to cancel and no
+      // portal to offer.
+      if (e.plan === "comp") return false;
+      if (e.stripe_customer_id || e.stripe_subscription_id) return true;
+    }
+  }
+  return false;
+}
+
 // --- Stripe Checkout Session ------------------------------------------------
 //
 // Configured in Checkout Studio. Gated on STRIPE_SECRET_KEY: without it the
@@ -616,9 +705,35 @@ async function onMessage(env, msg, seq) {
     return;
   }
 
+  if (verb === "/manage" || verb === "/billing") {
+    if (!paywallOn(env)) return;
+    const portal = await portalFor(env, id);
+    return void say(env, id, portal
+      ? fill("portal", { link: portal.url })
+      : MSG["portal-unavailable"]);
+  }
+
   if (STOP.has(verb)) {
-    await say(env, id, MSG.stopped);
+    // Honour the request either way — they asked to stop, so delivery stops.
+    // What changes here is that somebody with a live subscription is also
+    // told how to stop the money, instead of silently continuing to pay.
+    const billing = paywallOn(env) && (await hasBilling(env, id));
+    const portal = billing ? await portalFor(env, id) : null;
+
+    if (billing && portal) {
+      await say(env, id, fill("stopped-billing", { link: portal.url }));
+    } else {
+      await say(env, id, MSG.stopped);
+    }
     await enqueue(env, { verb: "stop", chat_id: id, type: chat.type || "?" }, seq);
+
+    if (billing && !portal) {
+      // The one case the subscriber cannot resolve alone.
+      await notifyOwner(env,
+        `Chat ${id} unsubscribed and has a live Stripe subscription, but no ` +
+        `customer portal is configured. Cancel it in the Stripe dashboard or ` +
+        `they will keep being charged.`);
+    }
     return;
   }
 }
@@ -691,7 +806,8 @@ export default {
       for (const name of ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
                           "DRAIN_SECRET", "LIST_URL", "QUEUE",
                           "STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
-                          "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]) {
+                          "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID",
+                          "PORTAL_URL", "PORTAL_RETURN_URL"]) {
         config[name] = Boolean(env[name]);
       }
       // STRIPE_WEBHOOK_SECRET is reported but does not count as missing. The
@@ -704,7 +820,8 @@ export default {
       // because "is the paywall actually on?" is otherwise unanswerable from
       // outside.
       const OPTIONAL = new Set(["STRIPE_WEBHOOK_SECRET", "PAY_URL", "COMP_CODES",
-                                "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID"]);
+                                "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID",
+                                "PORTAL_URL", "PORTAL_RETURN_URL"]);
       const missing = Object.entries(config)
         .filter(([k, v]) => !v && !OPTIONAL.has(k)).map(([k]) => k);
       const unconfigured = Object.entries(config)
