@@ -360,6 +360,78 @@ Things worth knowing when reading these:
   unconditionally — a confirmation that does not arrive is a nuisance, a briefing
   that does not arrive because of one is a fault.
 
+## The paywall
+
+**$4.99 a year, and it is off until `STRIPE_PAY_URL` is set.** That one secret
+is the switch for delivery; `PAY_URL` on the Worker is the switch for what the
+bot says. Both have to be set for the thing to work end to end, and the gate
+is deliberately keyed on the pay link rather than on anything else: the
+harmful misconfiguration is enforcing with no link for people to pay at, and
+keying it this way round makes that state unreachable. The opposite slip —
+selling while still delivering to everyone — costs revenue and announces
+itself in the delivery summary's entitlement table.
+
+### Who receives an edition
+
+Everything is decided by `scripts/entitlement.py` and applied in one place,
+`recipients()`:
+
+| state | receives it | meaning |
+|---|---|---|
+| `paid` | yes | inside `paid_until` |
+| `grace` | yes | up to 7 days past it, covering a card Stripe is retrying |
+| `trial` | yes | fewer than 3 editions since `trial_started` |
+| `lapsed` | no | was paid or trialling, and that ran out |
+| `none` | no | nothing has ever granted this chat anything |
+
+The owner is never filtered. A chat with no entitlement fields receives
+nothing, which is the safe default for one that has only just appeared.
+
+The trial is counted in **editions, not days**, and counted out of git: the
+editions committed since `trial_started`. Nothing is decremented at send time,
+so the delivery path still only reads.
+
+### Reading the delivery summary
+
+Every edition's summary carries an entitlement table — each approved chat, its
+plan, and why it did or did not receive that edition. Read it when a
+subscriber says they stopped getting the briefing; it answers that directly.
+
+If the paywall excludes **every** subscriber the run says so as a warning,
+because "1 recipient" otherwise looks like an ordinary quiet day. That is
+either a genuinely empty paid list or the paywall misfiring, and the two need
+opposite responses.
+
+### Turning it on
+
+1. Create the Stripe product, a $4.99/year recurring price, and a Payment Link
+   with *Allow promotion codes* ticked.
+2. Run **Find my Telegram chat ID** with **grandfather** ticked, so existing
+   subscribers are not cut off. Done 3 November 2026 for the original four,
+   who are covered to 3 November 2027.
+3. Set `PAY_URL` and `STRIPE_WEBHOOK_SECRET` on the Worker, re-paste it, and
+   check `/health` reports the new `version` and both under `config`.
+4. Point a Stripe webhook at `<worker>/stripe` and paste its signing secret
+   into `STRIPE_WEBHOOK_SECRET`.
+5. Set `STRIPE_PAY_URL` in GitHub secrets. **This is the step that starts
+   enforcing** — do it last.
+
+### Cancellation is not self-service yet
+
+`/stop` removes someone from the list but **cannot cancel their Stripe
+subscription**: that needs a secret key in the Worker, which it deliberately
+does not have. Until a Stripe customer-portal link exists, someone who opts
+out keeps being charged unless you cancel it in Stripe yourself. The reminder
+wording tells them to send `/stop`; acting on it is manual.
+
+### Comp codes
+
+`COMP_CODES` on the Worker, as `FRIENDS:1, PRESS:2` — code and years.
+Redeemed with `/promo CODE`, granting a year on the spot with no Stripe
+involved. No expiry and no redemption limits, on purpose: those need race-safe
+counting, KV has no transactions, and a cap that miscounts is worse than none.
+Anything needing a limit should be a Stripe 100%-off promotion code instead.
+
 ## Recalling a briefing sent in error
 
 **The clock is 48 hours.** Telegram lets a bot delete its own messages for

@@ -932,5 +932,25 @@ with tempfile.TemporaryDirectory() as td:
             222: ("2026-12-01", "paid", None),
             333: (None, None, "2026-11-01")})
 
+# --- the delivery workflow must actually use the paywall -------------------
+# The model and the filter are useless if deliver.yml never passes --editions,
+# and that is a one-line omission nothing else would notice: delivery would
+# keep working and quietly charge nobody. Asserted against the workflow text
+# because there is no other way to catch it from here.
+DELIVER = Path(__file__).resolve().parent.parent / ".github/workflows/deliver.yml"
+if DELIVER.is_file():
+    dy = DELIVER.read_text(encoding="utf-8")
+    expect("deliver.yml applies the paywall when a pay link is configured",
+           ("--editions editions" in dy, "STRIPE_PAY_URL" in dy), (True, True))
+    # Gated on the pay link, not on anything else: the harmful state is
+    # enforcing with no link for people to pay at, and keying it this way
+    # round makes that state unreachable.
+    expect("and keeps the unfiltered call for when no pay link is set",
+           dy.count("subscribers.py recipients"), 2)
+    expect("the entitlement table reaches the job summary",
+           "entitlement.md" in dy, True)
+else:
+    print("SKIP  .github/workflows/deliver.yml not present")
+
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)
