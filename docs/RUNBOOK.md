@@ -117,16 +117,23 @@ remain in the public history. See *Purging the old ids* below.
 uploads the PDF once and reuses the `file_id` Telegram returns for the rest, so
 twenty recipients cost one upload rather than twenty.
 
-**Adding someone.** They send the bot `/start`. `subscriptions.yml` polls the
-bot **every five minutes**, records them under `pending` — which entitles them to
-nothing — replies telling them so, and messages **you** with their name and id so
-you can decide without opening GitHub.
+**Adding someone.** They send the bot `/start`. The Worker answers them in
+milliseconds and queues the decision; `subscriptions.yml` later applies it to the
+list, recording them under `pending` — which entitles them to nothing — and
+messages **you** with their name and id so you can decide without opening GitHub.
+
+The reply is instant. The bookkeeping is not. GitHub does not honour
+`*/5 * * * *`: measured over the 20 runs to 2026-11-05, the mean gap between
+fires was 5h47m and the longest 10h06m — roughly 1.5% of the declared cadence.
+Treat the list as catching up within **hours**, not minutes. Delivery does not wait for it —
+`deliver.yml` drains the queue itself before reading the list, so every edition
+goes out against current state regardless of when the poller last ran.
 
 Two ways to enrol them, and they do the same thing:
 
 | | how | applied |
 |---|---|---|
-| From Telegram | reply `/approve <id>` to the bot | within ~5 minutes |
+| From Telegram | reply `/approve <id>` to the bot | by the next poller run (hours), and always before the next edition |
 | From GitHub | **Actions → Find my Telegram chat ID**, `approve` input | immediately |
 
 The owner's commands, honoured **only** from the owner's own chat:
@@ -157,9 +164,11 @@ spending the Telegram send quota. **Discovery is automatic; consent is not.**
 If you would rather `/start` enrol people directly, it is one line in
 `process()` — but that is the decision it reverses.
 
-**Leaving needs nobody's permission.** A `/stop` (or `/unsubscribe`) is acted on
-within about five minutes. They are also remembered in an `unsubscribed` list, so
-a message still sitting in Telegram's backlog cannot re-propose them as a
+**Leaving needs nobody's permission.** A `/stop` (or `/unsubscribe`) is
+acknowledged instantly by the Worker and applied to the list by the next poller
+run — and in any case before the next edition, which drains the queue first.
+They are also remembered in an `unsubscribed` list, so a message still sitting
+in Telegram's backlog cannot re-propose them as a
 candidate. `/start` later puts them back in `pending` — returning still needs
 approval. An `approve` overrides a remembered opt-out, since that is the owner
 saying so explicitly.

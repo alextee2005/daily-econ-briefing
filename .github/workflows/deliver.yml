@@ -4,8 +4,12 @@ name: Deliver briefing to Telegram
 # Also runnable by hand from the Actions tab (optionally naming a specific file).
 #
 # Sends to the owner (the TELEGRAM_CHAT_ID secret) plus every approved chat in
-# subscribers.json. Use the "Find my Telegram chat ID" workflow to enrol people;
-# this workflow only reads the list.
+# subscribers.json. Use the "Find my Telegram chat ID" workflow to enrol people.
+#
+# It applies any queued subscription decisions before reading the list, so that
+# entitlement is judged on what people have actually asked for and paid for
+# rather than on whenever GitHub last ran the poller. It does not enrol or
+# answer anybody; see the step for why that matters.
 
 on:
   push:
@@ -70,6 +74,132 @@ jobs:
             exit 1
           fi
           echo "Selected: $PDF (${SIZE_MB}MB)"
+
+      - name: Apply queued subscriptions before reading the list
+        # WHY THIS IS HERE AND NOT LEFT TO THE POLLER
+        # subscriptions.yml declares "*/5 * * * *", but GitHub does not honour
+        # that. Measured over the 20 runs to 2026-11-05, the mean gap between
+        # fires was 5h47m and the longest was 10h06m — roughly 1.5% of the
+        # declared cadence, which is why run numbers are in the hundreds rather
+        # than the tens of thousands.
+        #
+        # For most bookkeeping that lag is harmless: under the webhook the
+        # Worker has already answered the person in milliseconds, and reminders
+        # are day-granular. One case is not harmless. Once the paywall is
+        # enforced, entitlement is read HERE, at delivery time. Someone who pays
+        # in the hours before an edition goes out would be filtered out of the
+        # edition they just paid for, because the grant was still sitting in the
+        # queue. Draining first makes the cron cadence irrelevant to the only
+        # moment where staleness costs a subscriber something.
+        #
+        # Never fatal, like every other list step in this workflow: a briefing
+        # that reaches people matters more than up-to-the-second bookkeeping. On
+        # any failure this falls through and the fetch below reads whatever the
+        # Worker currently holds.
+        #
+        # This drains the same queue as subscriptions.yml and the two workflows
+        # have separate concurrency groups, so they can overlap. That is safe:
+        # apply_queue() is idempotent, the queue only hands items out on read and
+        # deletes them on acknowledgement, and an item that loses a race stays
+        # queued for the next drain.
+        env:
+          DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
+          OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+
+          skip() { echo "::warning::$1"; echo "::warning::Delivering against the list as it currently stands."; exit 0; }
+
+          if [ -z "${DRAIN_URL:-}" ]; then
+            echo "TELEGRAM_DRAIN_URL is not set; nothing to drain."
+            exit 0
+          fi
+
+          # The queue is applied to the list as the Worker holds it, so fetch it
+          # first. The step below re-reads it afterwards; that second read is
+          # what delivery actually uses, and it doubles as proof the store landed.
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/pre.json; then
+            skip "Could not reach the Worker to read the list before draining."
+          fi
+          python3 - <<'PY' || exit 0
+          import json, pathlib, sys
+          try:
+              lst = (json.load(open('/tmp/pre.json')) or {}).get('list')
+          except Exception as exc:
+              print(f"::warning::The Worker's list was not readable JSON: {exc}")
+              sys.exit(1)
+          if lst is None:
+              print("::warning::The Worker holds no list yet; nothing to drain into.")
+              sys.exit(1)
+          pathlib.Path('subscribers.json').write_text(json.dumps(lst, indent=2) + "\n")
+          PY
+          [ -s subscribers.json ] || skip "No list to apply queued decisions to."
+
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -G "${DRAIN_URL%/}/queue" --data-urlencode "secret=${DRAIN_SECRET}" \
+                 -o /tmp/queue.json; then
+            skip "Could not reach the Worker to read the queue."
+          fi
+
+          COUNT=$(python3 -c "
+          import json
+          try: print(len(json.load(open('/tmp/queue.json')).get('items') or []))
+          except Exception: print(-1)
+          " 2>/dev/null || echo -1)
+
+          if [ "$COUNT" = "-1" ]; then
+            skip "The Worker's queue reply was not readable JSON."
+          fi
+          echo "${COUNT} queued decision(s) waiting at delivery time."
+          if [ "$COUNT" = "0" ]; then exit 0; fi
+
+          # Applies verbs only. This sends nobody anything: the drain action
+          # writes the ids to acknowledge, and under the webhook the Worker
+          # already replied to each person when it queued the decision.
+          #
+          # It does, however, name chat ids — in its stdout ("<id>: awaiting
+          # approval") and in a GITHUB_STEP_SUMMARY block. This repository is
+          # public and so are its logs, and chat ids are the personal data the
+          # move to KV existed to protect, so neither is let through as-is: the
+          # step summary is discarded, and every run of six or more digits in the
+          # output is reduced to its last three. Six, not four, so that dates
+          # survive; the ids are nine or ten.
+          if ! GITHUB_STEP_SUMMARY=/dev/null \
+               python3 scripts/subscribers.py drain \
+                 --updates /tmp/queue.json --replies /tmp/ack.json \
+                 > /tmp/drain.log 2>&1; then
+            sed -E 's/[0-9]{3,}([0-9]{3})/…\1/g' /tmp/drain.log | tail -20
+            skip "Could not apply the queued decisions."
+          fi
+          sed -E 's/[0-9]{3,}([0-9]{3})/…\1/g' /tmp/drain.log
+
+          # Store, then acknowledge, in that order and never the other way: an
+          # acknowledgement for a decision that never landed deletes it, which
+          # is how an opt-out vanishes silently.
+          CODE=$(curl -sS -o /tmp/put.json -w '%{http_code}' \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            -X PUT "${DRAIN_URL%/}/list?secret=${DRAIN_SECRET}" \
+            -H 'content-type: application/json' --data-binary @subscribers.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::warning::The Worker refused the updated list (HTTP ${CODE})."
+            echo "::warning::Not acknowledged, so the poller replays these items."
+            skip "Queued decisions were not applied before this delivery."
+          fi
+          echo "Stored: $(cat /tmp/put.json)"
+
+          if ! curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                 -X POST "${DRAIN_URL%/}/ack?secret=${DRAIN_SECRET}" \
+                 -H 'content-type: application/json' \
+                 -d "{\"ids\": $(cat /tmp/ack.json)}" -o /tmp/ack_resp.json; then
+            echo "::warning::Applied and stored, but the queue was not acknowledged."
+            echo "::warning::The poller replays these items; applying them again is"
+            echo "::warning::a no-op, so nothing is lost or duplicated."
+            exit 0
+          fi
+          echo "Applied and acknowledged $(python3 -c "import json; print(len(json.load(open('/tmp/ack.json'))))") item(s)."
 
       - name: Fetch the subscriber list
         # The list lives in Cloudflare KV, not in this repository — chat IDs are

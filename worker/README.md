@@ -22,11 +22,17 @@ Telegram ──► Worker ──► KV queue ──► subscriptions.yml ──�
 | Your notification of the request, with Approve / Deny buttons | instant |
 | Approve tap → "…has been approved." to the subscriber | instant |
 | `/stop` → "We have received your unsubscribe request…" | instant |
-| `subscribers.json` catching up | ≤ 5 minutes |
+| the stored list catching up | hours — see below |
 
-The last row is the only lag, and it matters in one narrow case: a subscriber
-approved seconds before an edition is generated may miss that one edition,
-because delivery reads the committed list. They will receive the next.
+The last row is the only lag, and it is larger than it looks. GitHub does not
+honour `*/5 * * * *`: measured over the 20 runs to 2026-11-05, the mean gap
+between fires was 5h47m and the longest 10h06m — roughly 1.5% of the declared
+cadence.
+
+It no longer costs a subscriber an edition, though. `deliver.yml` drains the
+queue itself before it reads the list, so someone approved — or someone who paid
+— seconds before an edition is generated is counted in that edition rather than
+the next one.
 
 ---
 
@@ -228,7 +234,7 @@ From another Telegram account, send the bot `/start`.
 | instant "Your request for subscription is pending." | run the webhook workflow with `check`; a `last delivery attempt failed: 403` means `WEBHOOK_SECRET` and `TELEGRAM_WEBHOOK_SECRET` differ |
 | you get the request with Approve / Deny buttons | `OWNER_CHAT_ID` is wrong or not set |
 | tapping Approve → subscriber told at once | check the Worker's live logs (**Logs** on its page) |
-| a "Update briefing subscribers" commit within 5 minutes | check the **Answer the Telegram bot** workflow run |
+| `<worker>/health` shows `queued` returning to 0 | check the **Answer the Telegram bot** workflow run; it can be hours behind, so run it by hand to confirm |
 
 ## Undoing it
 
@@ -398,9 +404,10 @@ equivalent and keeps the list out of a workflow log entirely.
 
 ## Verifying it end to end
 
-Send `/start` from a test account, approve it, and within five minutes
-`<worker>/health` should show `approved` incremented — with **no commit** to the
-repository. That absence is the point.
+Send `/start` from a test account and approve it. `<worker>/health` should show
+`queued` rise at once, then `approved` increment once **Answer the Telegram bot**
+has run — with **no commit** to the repository. That absence is the point. Run
+that workflow by hand rather than waiting: its schedule can be hours apart.
 
 ## Rolling back
 

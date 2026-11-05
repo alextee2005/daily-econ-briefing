@@ -27,6 +27,18 @@ name: Answer the Telegram bot
 # A dropped run delays bookkeeping; under the webhook the person has already been
 # answered. It also costs no model tokens, where a Routine at this cadence would
 # be roughly $0.43 a time.
+#
+# WHAT THE CADENCE BELOW ACTUALLY IS
+# Not five minutes. GitHub throttles this heavily: over the 20 runs to
+# 2026-11-05 the mean gap was 5h47m and the longest 10h06m — about 1.5% of what
+# the expression asks for, which is why the run counter is in the hundreds
+# rather than the tens of thousands. The expression is left as-is because
+# asking for more often costs nothing and occasionally gets it.
+#
+# Nothing may therefore depend on this running promptly. The one place that
+# would have — entitlement at delivery time, where a subscriber who had just
+# paid could be filtered out of the edition they paid for — does not: deliver.yml
+# drains this same queue itself before reading the list.
 
 on:
   schedule:
