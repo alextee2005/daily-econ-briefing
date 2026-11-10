@@ -66,6 +66,9 @@ const MSG = {
   pay:
     "Your free editions are used up. A year of the briefing is " +
     "$4.99: {link}",
+  checkout:
+    "A year of the briefing is $4.99. Pay here and it starts with " +
+    "the next edition: {link}",
   lapsed:
     "Your subscription has ended, so the briefing has stopped. A " +
     "year is $4.99 whenever you want it back: {link}",
@@ -99,7 +102,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-05b";
+const VERSION = "2026-11-10a";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -167,6 +170,10 @@ async function onStripe(env, event) {
     // Answer now rather than at the next drain. They have just paid; a
     // five-minute silence is exactly when someone wonders if it worked.
     await tg(env, "sendMessage", { chat_id: chat, text: MSG.paid });
+    // The completed checkout is exactly what /manage needs behind it, so this
+    // is where it appears. Not at the drain: the drain can be hours away.
+    await publishMenu(env, chat, "paid");
+    await markPaid(env, chat);
     return { handled: true };
   }
 
@@ -185,6 +192,10 @@ async function onStripe(env, event) {
       verb: "paid", chat_id: chat, event_id: evt, years: 1,
       stripe_customer_id: obj.customer || null,
     }, key);
+    // A renewal, so the menu is almost certainly already right. Set it anyway:
+    // it costs one call a year and repairs a chat whose menu was missed.
+    await publishMenu(env, chat, "paid");
+    await markPaid(env, chat);
     return { handled: true };
   }
 
@@ -541,6 +552,100 @@ function paywallOn(env) {
   return Boolean(env.PAY_URL);
 }
 
+// --- per-chat command menus -------------------------------------------------
+//
+// A command that refuses you is worse than one you were never offered, so the
+// menu grows with the chat: /start alone until they start, then /promo,
+// /checkout and /stop, then /manage once a checkout has actually completed.
+// Telegram does this natively — setMyCommands takes a scope, and a chat-scoped
+// list replaces the default one for that chat alone.
+//
+// Published from here, at the moment the chat changes, because this is the
+// only part that hears from Telegram in real time. The commands workflow owns
+// the default and owner scopes and re-states every known subscriber's menu,
+// which is what migrates chats that subscribed before any of this existed.
+//
+// Mirrored from MENUS/CMD_TEXT in scripts/subscribers.py; test_subscribers.py
+// compares the two so the copies cannot drift.
+const CMD_TEXT = {
+  start: "Subscribe to the daily briefing",
+  stop: "Stop receiving the briefing",
+  promo: "Redeem a promo code",
+  checkout: "Subscribe for $4.99 a year",
+  manage: "Update your card, see invoices, or cancel",
+};
+
+const MENUS = {
+  new: ["start"],
+  started: ["promo", "checkout", "stop"],
+  paid: ["manage", "stop"],
+};
+
+const PAYWALL_ONLY = new Set(["promo", "checkout", "manage"]);
+
+/**
+ * Give one chat the menu for `tier`.
+ *
+ * "new" deletes the chat's own list rather than setting one, so the chat falls
+ * back to the default scope instead of carrying a stale copy of it: that way
+ * the default menu stays the single place /start is described.
+ *
+ * Never throws and never blocks the reply. A wrong menu is a cosmetic fault;
+ * failing to answer somebody because a menu call went wrong is not. The
+ * commands workflow re-states every subscriber's menu, so a miss here is
+ * repaired rather than permanent.
+ */
+async function publishMenu(env, chatId, tier) {
+  try {
+    const scope = { type: "chat", chat_id: chatId };
+    if (tier === "new") {
+      await tg(env, "deleteMyCommands", { scope });
+      return;
+    }
+    const names = (MENUS[tier] || []).filter(
+      (n) => paywallOn(env) || !PAYWALL_ONLY.has(n),
+    );
+    await tg(env, "setMyCommands", {
+      scope,
+      commands: names.map((n) => ({ command: n, description: CMD_TEXT[n] })),
+    });
+  } catch (e) {
+    console.error("could not publish the menu for a chat", e && e.stack);
+  }
+}
+
+/**
+ * Remember that this chat has just paid, for as long as the drain might take.
+ *
+ * hasBilling() reads the stored list, and that only catches up when the queue
+ * is drained — which can be hours away, because GitHub does not honour the
+ * poller's schedule. Inside that window the list still says the chat has no
+ * billing, so /checkout would hand somebody who has just paid a second Payment
+ * Link, and Stripe would be right to charge them for a second subscription.
+ * This marker closes the window.
+ *
+ * The "paid:" prefix is deliberately not "q:", the only prefix the drain and
+ * /health list, so this can never be mistaken for a queued decision. Seven
+ * days because the list has certainly caught up by then; expiry is what keeps
+ * this from becoming a second, half-maintained copy of who has paid.
+ */
+async function markPaid(env, chatId) {
+  try {
+    await env.QUEUE.put(`paid:${chatId}`, "1", { expirationTtl: 7 * 24 * 3600 });
+  } catch (e) {
+    console.error("could not mark a chat as paid", e && e.stack);
+  }
+}
+
+async function paidRecently(env, chatId) {
+  try {
+    return Boolean(await env.QUEUE.get(`paid:${chatId}`));
+  } catch (e) {
+    console.error("could not read the paid marker", e && e.stack);
+    return false;   // falls back to the stored list, never to "charge them"
+  }
+}
+
 /** The Payment Link with this chat attached, so the webhook can match it up. */
 function payLink(env, chatId) {
   const base = String(env.PAY_URL || "");
@@ -661,6 +766,11 @@ async function onMessage(env, msg, seq) {
     const code = text.split(/\s+/)[1] || "";
     const years = compYears(env, code);
     if (!years) return void say(env, id, MSG["comp-bad"]);
+    // /promo is not in the default menu, but nothing stops someone typing it
+    // before /start, so set the menu here too rather than assume they arrived
+    // in order. Deliberately "started", not "paid": a comp has no Stripe
+    // customer behind it, so /manage would open nothing.
+    await publishMenu(env, id, "started");
     await say(env, id, MSG["comp-applied"]);
     await enqueue(env, {
       verb: "comp", chat_id: id, type: chat.type || "?",
@@ -671,6 +781,10 @@ async function onMessage(env, msg, seq) {
   }
 
   if (START.has(verb)) {
+    // Before the reply, so the menu is already right when they look at it.
+    // "started" either way: with the paywall off it collapses to /stop, which
+    // is all the bot can honestly offer them at that point.
+    await publishMenu(env, id, "started");
     if (paywallOn(env)) {
       await paywallStart(env, id, chat.type || "?", seq);
       if (env.OWNER_CHAT_ID && !isOwner(env, id)) {
@@ -705,6 +819,17 @@ async function onMessage(env, msg, seq) {
     return;
   }
 
+  if (verb === "/checkout") {
+    if (!paywallOn(env)) return;
+    // Someone who is already paying should not be handed a second Payment
+    // Link: paying twice buys two subscriptions, not two years, and Stripe
+    // would be right to take the money.
+    if ((await hasBilling(env, id)) || (await paidRecently(env, id))) {
+      return void say(env, id, MSG["already-subscribed"]);
+    }
+    return void say(env, id, fill("checkout", { link: payLink(env, id) }));
+  }
+
   if (verb === "/manage" || verb === "/billing") {
     if (!paywallOn(env)) return;
     const portal = await portalFor(env, id);
@@ -726,6 +851,10 @@ async function onMessage(env, msg, seq) {
       await say(env, id, MSG.stopped);
     }
     await enqueue(env, { verb: "stop", chat_id: id, type: chat.type || "?" }, seq);
+    // Back to the default menu, which is /start — the one thing they can
+    // usefully do next. Deleting their own list rather than setting one keeps
+    // the default scope the single description of /start.
+    await publishMenu(env, id, "new");
 
     if (billing && !portal) {
       // The one case the subscriber cannot resolve alone.

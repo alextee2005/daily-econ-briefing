@@ -289,7 +289,7 @@ expect("every outcome the code can produce has a message",
 # the notices sweep. Grouped rather than listed one by one, but still an
 # exhaustive check: a key that belongs to neither set is a typo nobody sends.
 PAYWALL_MSG = {"paid", "cancelled", "trial", "signed-up", "pay", "lapsed",
-               "reminder", "comp-applied", "comp-bad",
+               "reminder", "comp-applied", "comp-bad", "checkout",
                "portal", "stopped-billing", "portal-unavailable"}
 expect("every message is either a spoken outcome or paywall wording",
        sorted(set(MSG) - SPOKEN - PAYWALL_MSG), [])
@@ -617,6 +617,46 @@ if WORKER.is_file():
     extra = set(worker_msg) - set(MSG) - {"denied"}
     expect("the Worker says nothing the Python side does not know about",
            sorted(extra), [])
+
+    # The menu tables are duplicated for the same reason the wording is: the
+    # Worker publishes a chat's menu the moment that chat changes and cannot
+    # fetch the table first. Drift here is worse than drift in wording — the
+    # workflow re-states every subscriber's menu, so the two copies would fight
+    # each other, a chat flipping between tiers depending on which ran last.
+    def js_list(name, text):
+        body = text.split(f"const {name} = {{", 1)[1].split("\n};", 1)[0]
+        out = {}
+        for key, items in re.findall(r'(\w+):\s*\[([^\]]*)\]', body):
+            out[key] = re.findall(r'"([^"]+)"', items)
+        return out
+
+    def js_map(name, text):
+        body = text.split(f"const {name} = {{", 1)[1].split("\n};", 1)[0]
+        return dict(re.findall(r'(\w+):\s*"((?:[^"\\]|\\.)*)"', body))
+
+    worker_menus = js_list("MENUS", js)
+    # The Worker never publishes the owner's menu — that is the workflow's job,
+    # and the owner's scope is set from one place only — so it carries the three
+    # subscriber tiers and nothing else.
+    expect("the Worker carries exactly the subscriber tiers",
+           sorted(worker_menus), ["new", "paid", "started"])
+    for tier in sorted(worker_menus):
+        expect(f"the Worker's {tier!r} tier matches",
+               worker_menus[tier], subscribers.MENUS[tier])
+
+    worker_text = js_map("CMD_TEXT", js)
+    for name, desc in sorted(worker_text.items()):
+        expect(f"the Worker's {name!r} description matches",
+               desc, subscribers.CMD_TEXT.get(name))
+    needed = {n for t in ("new", "started", "paid") for n in subscribers.MENUS[t]}
+    expect("and it describes every command it can publish",
+           sorted(needed - set(worker_text)), [])
+
+    worker_gated = set(re.findall(
+        r'PAYWALL_ONLY = new Set\(\[([^\]]*)\]', js))
+    expect("the Worker hides the same commands until PAY_URL is set",
+           sorted(re.findall(r'"([^"]+)"', worker_gated.pop() if worker_gated else "")),
+           sorted(subscribers.PAYWALL_ONLY))
 else:
     print("SKIP  worker/src/index.js not present")
 
@@ -939,21 +979,58 @@ with tempfile.TemporaryDirectory() as td:
 # rather than discovered in a workflow run.
 import re as _re  # noqa: E402
 
+def names(**kw):
+    return [c["command"] for c in subscribers.bot_commands(**kw)]
+
+
 PUBLIC_OFF = subscribers.bot_commands(paywall=False, owner=False)
 PUBLIC_ON = subscribers.bot_commands(paywall=True, owner=False)
 OWNER_OFF = subscribers.bot_commands(paywall=False, owner=True)
 OWNER_ON = subscribers.bot_commands(paywall=True, owner=True)
 
-expect("with the paywall off the public menu is just start and stop",
-       [c["command"] for c in PUBLIC_OFF], ["start", "stop"])
-expect("and /promo and /manage appear once it is on",
-       [c["command"] for c in PUBLIC_ON], ["start", "stop", "promo", "manage"])
-expect("the owner's menu adds their four, and only to their scope",
+# The flow the menu exists to express: a stranger can only start; starting
+# offers the two ways to get access and the way out; paying replaces those with
+# the billing page. Each tier is asserted whole, because what matters is what a
+# subscriber is NOT offered — /manage before there is a card to manage, or
+# /checkout after they have already paid, are the mistakes this prevents.
+expect("a chat that has not started sees only /start",
+       names(paywall=True, tier="new"), ["start"])
+expect("after /start it sees the two routes in and the way out",
+       names(paywall=True, tier="started"), ["promo", "checkout", "stop"])
+expect("once a checkout has completed it sees billing instead",
+       names(paywall=True, tier="paid"), ["manage", "stop"])
+expect("/manage is never offered before a checkout",
+       [t for t in ("new", "started") if "manage" in names(paywall=True, tier=t)], [])
+expect("/checkout is never offered after one",
+       "checkout" in names(paywall=True, tier="paid"), False)
+expect("and the default scope stays /start whatever the paywall is doing",
+       (names(paywall=False, tier="new"), names(paywall=True, tier="new")),
+       (["start"], ["start"]))
+
+expect("the owner's menu carries everything, and only in their scope",
+       [c["command"] for c in OWNER_ON],
+       ["start", "stop", "promo", "checkout", "manage",
+        "approve", "deny", "pending", "status"])
+expect("with the paywall off the owner loses the three that answer nothing",
        [c["command"] for c in OWNER_OFF],
        ["start", "stop", "approve", "deny", "pending", "status"])
-expect("no owner command ever reaches the public menu",
-       [c["command"] for c in PUBLIC_ON if c["command"] in
-        {"approve", "deny", "pending", "status"}], [])
+expect("no owner command ever reaches a subscriber's menu",
+       [c for t in ("new", "started", "paid")
+        for c in names(paywall=True, tier=t)
+        if c in {"approve", "deny", "pending", "status"}], [])
+
+# tier_for decides which of the two a known subscriber gets. Keyed on having a
+# Stripe customer rather than on being entitled: a lapsed payer still has a
+# card and invoices to manage, and a comp has no customer behind it at all, so
+# /manage would open nothing for them.
+expect("a paying chat gets the billing menu",
+       subscribers.tier_for({"plan": "paid", "stripe_customer_id": "cus_1"}), "paid")
+expect("a cancelled payer keeps it, because the card is still theirs",
+       subscribers.tier_for({"plan": "cancelled", "stripe_customer_id": "cus_1"}), "paid")
+expect("a comped chat does not, because there is no customer to manage",
+       subscribers.tier_for({"plan": "comp", "paid_until": "2027-11-01"}), "started")
+expect("nor does a chat on a trial",
+       subscribers.tier_for({"trial_started": "2026-11-09"}), "started")
 
 # A command that answers nothing must not be advertised. /promo and /manage
 # both return without replying until PAY_URL is set.
@@ -973,7 +1050,7 @@ for scope, items in [("public", PUBLIC_ON), ("owner", OWNER_ON)]:
 # offers people something that does nothing.
 KNOWN = ({c.lstrip("/") for c in subscribers.COMMANDS}
          | {c.lstrip("/") for c in subscribers.OWNER_COMMANDS}
-         | {"promo", "manage"})   # Worker-only, no Python polling equivalent
+         | {"promo", "manage", "checkout"})  # Worker-only: no polling equivalent
 expect("every menu entry is a command the bot handles",
        sorted({c["command"] for c in OWNER_ON} - KNOWN), [])
 

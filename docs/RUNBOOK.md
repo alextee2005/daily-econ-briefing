@@ -443,20 +443,50 @@ opposite responses.
 Telegram shows a command menu only if the bot has been told what it is.
 Actions → **Point the Telegram webhook at the Worker** → `commands`.
 
-It publishes two scopes: a public one, and a chat-scoped one for the owner, so
-subscribers are never shown the four owner commands that would refuse them.
+**The menu grows with the subscriber**, because being offered a command that
+then refuses you is worse than never being offered it. Telegram does this
+natively: `setMyCommands` takes a scope, and a chat-scoped list replaces the
+default one for that chat alone.
 
-Whether `/promo` and `/manage` are listed is **asked, not assumed** — the run
-reads the Worker's `/health` and looks at `config.PAY_URL`. Both commands
-return without replying until that variable is set, and a menu entry for a
-command that answers nothing is worse than no entry.
+| they see | when | menu |
+|---|---|---|
+| the default scope | never started, or after `/stop` | `/start` |
+| `started` | after `/start` | `/promo`, `/checkout`, `/stop` |
+| `paid` | after a checkout completes | `/manage`, `/stop` |
+| the owner's scope | always, in your chat only | all of the above plus the owner's four |
 
-**So re-run it after setting `PAY_URL`**, or the menu keeps hiding two
+So `/manage` is never offered before there is a card to manage, and
+`/checkout` disappears once it would charge someone twice.
+
+**Who sets which.** The Worker sets a chat's own menu at the moment that chat
+changes — on `/start`, on a redeemed code, when Stripe confirms a payment, and
+on `/stop`. It has to be the Worker: it is the only part that hears from
+Telegram in real time, and the queue drain can be hours behind. The `commands`
+workflow sets the default and owner scopes, and re-states every known
+subscriber's menu. That last part is also the migration: a chat that subscribed
+before any of this existed has no chat-scoped list, so without it they would
+fall back to the default menu and see only `/start`.
+
+A failed menu call is never fatal, in either place. A wrong menu is cosmetic;
+failing to answer somebody because a menu call went wrong is not. Re-running
+`commands` repairs anything the Worker missed.
+
+A comp is deliberately **not** the `paid` tier. There is no Stripe customer
+behind a free year, so `/manage` would open nothing.
+
+Whether `/promo`, `/checkout` and `/manage` are listed at all is **asked, not
+assumed** — the run reads the Worker's `/health` and looks at `config.PAY_URL`.
+All three return without replying until that variable is set, and a menu entry
+for a command that answers nothing is worse than no entry.
+
+**So re-run it after setting `PAY_URL`**, or the menus keep hiding three
 commands that now work. Nothing reminds you; the run says so in its own log,
-which you will not be reading at that point.
+which you will not be reading at that point. Re-run it too after granting a
+comp or approving someone by hand, if you want their menu right before their
+next message to the bot.
 
 Aliases are deliberately left out of the menu: `/subscribe`, `/unsubscribe`
-and `/billing` keep working, but three ways to do one thing in a six-item
+and `/billing` keep working, but three ways to do one thing in a three-item
 menu reads as three features.
 
 ### Cancellation
@@ -488,6 +518,18 @@ Redeemed with `/promo CODE`, granting a year on the spot with no Stripe
 involved. No expiry and no redemption limits, on purpose: those need race-safe
 counting, KV has no transactions, and a cap that miscounts is worse than none.
 Anything needing a limit should be a Stripe 100%-off promotion code instead.
+
+**The codes live in that variable and nowhere else.** Never put one in this
+repository: it is public, so a code committed here is a free subscription for
+anyone who reads the file. The variable is the only private place for it, which
+is why `/promo` answers *"That code is not valid"* until one is set — with no
+codes configured, nothing can be valid.
+
+For the same reason a short, guessable word is a weak code. `FRIEND` is fine
+for handing to people you know and expecting them to pass it on; it is not a
+limit on who can redeem it, because anyone who guesses it gets a free year and
+nothing counts redemptions. If that matters, use a Stripe 100%-off promotion
+code, which Stripe can cap and expire.
 
 ## Recalling a briefing sent in error
 

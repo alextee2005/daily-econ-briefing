@@ -68,6 +68,9 @@ jobs:
           ACTION: ${{ inputs.action }}
           OWNER_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRAIN_URL: ${{ secrets.TELEGRAM_DRAIN_URL }}
+          # Reads the subscriber list, so that "commands" can re-state each
+          # subscriber's own menu. The same secret the other workflows use.
+          DRAIN_SECRET: ${{ secrets.TELEGRAM_DRAIN_SECRET }}
         run: |
           set -uo pipefail
 
@@ -183,14 +186,26 @@ jobs:
               ;;
 
             commands)
-              # Publishes the autocomplete menu with setMyCommands, in two scopes: a
-              # public one, and a chat-scoped one for the owner so subscribers are
-              # never shown commands that would refuse them.
+              # Publishes the autocomplete menus with setMyCommands. Three kinds
+              # of scope, because being offered a command that then refuses you
+              # is worse than never being offered it:
               #
-              # Whether /promo and /manage appear depends on the Worker's PAY_URL,
-              # asked rather than guessed: both return without replying until it is
-              # set, and a menu entry for a command that answers nothing is worse
-              # than no entry. /health already reports it as a boolean.
+              #   default         /start — all a stranger can usefully do
+              #   owner's chat    everything, the owner-only four included
+              #   each subscriber their own tier: "started", or "paid" once a
+              #                   checkout has actually completed
+              #
+              # The Worker sets a chat's own menu as that chat changes, since it
+              # is the only part that hears from Telegram in real time. This step
+              # re-states them all, which is what migrates the chats that
+              # subscribed before per-chat menus existed — they have no
+              # chat-scoped list, so they would fall back to the default one and
+              # see only /start — and repairs any the Worker failed to set.
+              #
+              # Whether /promo, /checkout and /manage appear depends on the
+              # Worker's PAY_URL, asked rather than guessed: all three return
+              # without replying until it is set, and a menu entry for a command
+              # that answers nothing is worse than no entry. /health has it.
               PAYWALL=""
               if [ -z "${DRAIN_URL:-}" ]; then
                 echo "TELEGRAM_DRAIN_URL is not set, so the paywall cannot be on yet."
@@ -201,16 +216,34 @@ jobs:
                       /tmp/health.json 2>/dev/null || echo unknown)
                 case "$ON" in
                   yes) PAYWALL="--paywall"
-                       echo "The Worker has PAY_URL set: listing /promo and /manage." ;;
-                  no)  echo "The Worker has no PAY_URL: leaving /promo and /manage out." ;;
+                       echo "PAY_URL is set: listing /promo, /checkout and /manage." ;;
+                  no)  echo "No PAY_URL: leaving /promo, /checkout and /manage out." ;;
                   *)   echo "::warning::/health was unreadable; assuming the paywall is off." ;;
                 esac
               fi
 
+              # The per-chat menus need the subscriber list, which lives in the
+              # Worker's KV and not in this repository. Deliberately not fatal:
+              # without it the default and owner scopes are still published and
+              # the next run picks the subscribers up.
+              if [ -n "${DRAIN_URL:-}" ] && [ -n "${DRAIN_SECRET:-}" ]; then
+                if curl -sS --retry 3 --retry-delay 5 --retry-all-errors \
+                     -G "${DRAIN_URL%/}/list" --data-urlencode "secret=${DRAIN_SECRET}" \
+                     -o /tmp/list.json; then
+                  jq '.list // {}' /tmp/list.json > subscribers.json 2>/dev/null \
+                    || echo "::warning::The Worker's list was not readable JSON."
+                  echo "$(jq '(.approved // []) | length' subscribers.json) chat(s) on the list."
+                else
+                  echo "::warning::Could not read the list; per-chat menus are skipped."
+                fi
+              else
+                echo "No list credentials, so only the default and owner menus are set."
+              fi
+
               python3 scripts/subscribers.py commands $PAYWALL > /tmp/cmds.json
               echo "Publishing:"
-              jq -r 'to_entries[] | "  \(.key): " + ([.value[].command] | map("/" + .) | join(", "))' \
-                /tmp/cmds.json
+              jq -r '"  default: " + ([.default[].command] | map("/" + .) | join(", "))' /tmp/cmds.json
+              jq -r '"  owner:   " + ([.owner[].command] | map("/" + .) | join(", "))' /tmp/cmds.json
 
               api setMyCommands \
                 "$(jq -c '{commands: .default, scope: {type: "default"}}' /tmp/cmds.json)" \
@@ -225,9 +258,33 @@ jobs:
                 echo "::warning::not published. The public one was."
               fi
 
+              # One call per subscriber. Ids are masked to their last three
+              # digits because this log is public, and a failure is a warning
+              # rather than fatal: one chat's menu must not stop the rest.
+              N=$(jq '.chats | length' /tmp/cmds.json)
               echo
-              echo "Re-run this after setting PAY_URL, or the menu keeps hiding /promo"
-              echo "and /manage even once they work."
+              echo "Re-stating ${N} subscriber menu(s):"
+              BAD=0
+              while IFS= read -r row; do
+                CID=$(printf '%s' "$row" | jq -r '.chat_id')
+                TIER=$(printf '%s' "$row" | jq -r '.tier')
+                : > /tmp/tg.json
+                api setMyCommands "$(printf '%s' "$row" \
+                  | jq -c '{commands, scope: {type: "chat", chat_id: .chat_id}}')" || true
+                if jq -e '.ok' /tmp/tg.json >/dev/null 2>&1; then
+                  echo "  ...${CID: -3}  ${TIER}"
+                else
+                  echo "::warning::  ...${CID: -3} ${TIER} not set: $(jq -r '.description // "?"' /tmp/tg.json 2>/dev/null)"
+                  BAD=$((BAD + 1))
+                fi
+              done < <(jq -c '.chats[]' /tmp/cmds.json)
+              if [ "$BAD" != "0" ]; then
+                echo "::warning::${BAD} chat menu(s) were not set. Re-run to retry."
+              fi
+
+              echo
+              echo "Re-run this after setting PAY_URL, or the menus keep hiding"
+              echo "/promo, /checkout and /manage even once they work."
               ;;
 
             unpoint)

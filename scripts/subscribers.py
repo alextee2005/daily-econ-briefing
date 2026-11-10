@@ -172,6 +172,10 @@ MSG = {
                   "$4.99 whenever you want it: {link}"),
     "pay": ("Your free editions are used up. A year of the briefing is $4.99: "
             "{link}"),
+    # The answer to /checkout, which is a deliberate request for the link
+    # rather than a consequence of something else happening.
+    "checkout": ("A year of the briefing is $4.99. Pay here and it starts with "
+                 "the next edition: {link}"),
     "lapsed": ("Your subscription has ended, so the briefing has stopped. A "
                "year is $4.99 whenever you want it back: {link}"),
     "reminder": ("Your subscription renews in {n} day(s) at $4.99. It renews "
@@ -207,37 +211,73 @@ MSG = {
 # menu reads as three different features.
 #
 # (command, description, owner_only, needs_paywall)
-BOT_COMMANDS = [
-    ("start", "Subscribe to the daily briefing", False, False),
-    ("stop", "Stop receiving the briefing", False, False),
-    ("promo", "Redeem a promo code", False, True),
-    ("manage", "Update your card, see invoices, or cancel", False, True),
-    ("approve", "Owner: approve a chat by id", True, False),
-    ("deny", "Owner: deny or remove a chat by id", True, False),
-    ("pending", "Owner: list chats awaiting approval", True, False),
-    ("status", "Owner: subscriber counts", True, False),
-]
+CMD_TEXT = {
+    "start": "Subscribe to the daily briefing",
+    "stop": "Stop receiving the briefing",
+    "promo": "Redeem a promo code",
+    "checkout": "Subscribe for $4.99 a year",
+    "manage": "Update your card, see invoices, or cancel",
+    "approve": "Owner: approve a chat by id",
+    "deny": "Owner: deny or remove a chat by id",
+    "pending": "Owner: list chats awaiting approval",
+    "status": "Owner: subscriber counts",
+}
+
+# The menu depends on how far a chat has got, because being offered a command
+# that then refuses you is worse than never being offered it. Telegram supports
+# this directly: setMyCommands takes a scope, and a chat-scoped list replaces
+# the default one for that chat alone.
+#
+#   new      the default scope, and anyone who has stopped — just /start
+#   started  after /start, with no paid subscription yet
+#   paid     after a checkout completes
+#   owner    the owner's own chat
+#
+# Who publishes which: the Worker sets a chat's own menu as that chat changes,
+# because it is the only part that hears from Telegram in real time. The
+# commands workflow sets the default and owner scopes, and re-states every
+# known subscriber's menu — which is also what migrates the chats that were
+# already subscribed before any of this existed.
+#
+# Mirrored in worker/src/index.js; test_subscribers.py compares the two so the
+# two copies cannot drift.
+MENUS = {
+    "new": ["start"],
+    "started": ["promo", "checkout", "stop"],
+    "paid": ["manage", "stop"],
+    "owner": ["start", "stop", "promo", "checkout", "manage",
+              "approve", "deny", "pending", "status"],
+}
+
+# Without PAY_URL there is nothing to sell, no code to redeem against a price
+# and no card to manage, so these three return without replying. Hiding them
+# until it is set keeps the menu honest about what the bot will actually do.
+PAYWALL_ONLY = {"promo", "checkout", "manage"}
 
 
-def bot_commands(paywall: bool = False, owner: bool = False) -> list:
+def bot_commands(paywall: bool = False, owner: bool = False,
+                 tier: str = "new") -> list:
     """Menu entries for one Telegram scope.
 
-    `paywall` leaves out /promo and /manage until PAY_URL is set, because both
-    return without replying until then — and a menu entry for a command that
-    answers nothing is worse than no entry at all.
-
-    `owner` adds the owner's four. They go in a chat-scoped list rather than
-    the default one, so subscribers are not shown commands that would refuse
-    them.
+    `owner` selects the owner's menu whatever `tier` says, since the owner's
+    chat is a scope of its own. Otherwise `tier` picks one of MENUS.
     """
-    out = []
-    for name, desc, owner_only, needs_paywall in BOT_COMMANDS:
-        if owner_only and not owner:
-            continue
-        if needs_paywall and not paywall:
-            continue
-        out.append({"command": name, "description": desc})
-    return out
+    names = MENUS["owner"] if owner else MENUS[tier]
+    return [{"command": n, "description": CMD_TEXT[n]}
+            for n in names if paywall or n not in PAYWALL_ONLY]
+
+
+def tier_for(entry: dict) -> str:
+    """Which menu this subscriber should see.
+
+    Keyed on having paid rather than on entitlement: someone whose year has
+    run out still has a card and invoices to manage, so /manage stays. A comp
+    is deliberately not "paid" — there is no Stripe customer behind it, so the
+    billing portal would have nothing to open.
+    """
+    billing = (entry.get("stripe_customer_id")
+               or entry.get("plan") in ("paid", "cancelled"))
+    return "paid" if billing else "started"
 
 
 def fill(outcome: str, **kw) -> str:
@@ -1059,11 +1099,23 @@ def main() -> int:
     owner = owner_id()
 
     if args.action == "commands":
-        # Both scopes at once, so the caller cannot set one and forget the
-        # other and leave the owner's menu out of step with the public one.
+        # Every scope at once, so the caller cannot set one and forget another
+        # and leave the menus out of step with each other.
+        #
+        # "chats" carries one entry per approved subscriber, which does two
+        # jobs: it migrates the chats that subscribed before per-chat menus
+        # existed — they have no chat-scoped list, so they would otherwise fall
+        # back to the default one and see only /start — and re-running it
+        # repairs any chat whose menu the Worker failed to publish.
+        chats = [{"chat_id": e["chat_id"], "tier": tier_for(e),
+                  "commands": bot_commands(paywall=args.paywall,
+                                           tier=tier_for(e))}
+                 for e in data["approved"]
+                 if owner is None or e["chat_id"] != owner]
         print(json.dumps({
-            "default": bot_commands(paywall=args.paywall, owner=False),
+            "default": bot_commands(paywall=args.paywall, tier="new"),
             "owner": bot_commands(paywall=args.paywall, owner=True),
+            "chats": chats,
         }, indent=2))
         return 0
 
