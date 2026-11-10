@@ -660,14 +660,44 @@ if WORKER.is_file():
     expect("the checkout message carries no link of its own",
            ("{link}" in MSG["checkout"], "http" in MSG["checkout"]),
            (False, False))
-    branch = js.split('verb === "/checkout"', 1)[1].split("\n  }", 1)[0]
-    expect("/checkout sends the keyboard, not a filled-in link",
-           ("checkoutKeyboard(payLink(" in branch.replace("\n", " ").replace("  ", ""),
-            'fill("checkout"' in branch),
-           (True, False))
+    branch = js.split('verb === "/checkout"', 1)[1].split("\n  }\n", 1)[0]
+    # Asserted as "a keyboard built from payLink, and no link filled into the
+    # body" rather than as one exact expression: the first version of this
+    # matched the literal call checkoutKeyboard(payLink(...)) and broke the
+    # moment that was split over two statements, which is a test complaining
+    # about punctuation instead of behaviour.
+    expect("/checkout sends a keyboard built from the pay link",
+           ("checkoutKeyboard(" in branch, "payLink(env, id)" in branch),
+           (True, True))
+    expect("and never fills the link into the message body",
+           'fill("checkout"' in branch, False)
     kb = js.split("const checkoutKeyboard", 1)[1].split("});", 1)[0]
     expect("and that keyboard is a url button, so one tap opens Stripe",
            ("url" in kb, "callback_data" in kb), (True, False))
+
+    # A bot that goes quiet is the worst failure mode there is, because there
+    # is nothing to debug from. These four pin the fix for a real one: a
+    # Payment Link pasted with a trailing newline made an invalid button url,
+    # Telegram refused the whole send, and say() discarded the refusal — no
+    # reply to the subscriber and no line in the log.
+    say_body = js.split("async function say(", 1)[1].split("\n}", 1)[0]
+    expect("say() notices when Telegram refuses a send",
+           ("r.ok === false" in say_body, "console.error" in say_body),
+           (True, True))
+    expect("payLink cleans the configured url before using it",
+           "cleanUrl(env.PAY_URL)" in js, True)
+    clean = js.split("function cleanUrl(", 1)[1].split("\n}", 1)[0]
+    expect("and cleaning means trimming, rejecting inner whitespace and non-http",
+           (".trim()" in clean, "\\s" in clean, "https?" in clean),
+           (True, True, True))
+    # /health is where this should have been visible without reproducing it.
+    untrimmed_list = js.split("const untrimmed = [", 1)[1].split("]", 1)[0]
+    expect("/health flags whitespace on the url variables too",
+           all(n in untrimmed_list for n in ("PAY_URL", "PORTAL_URL")), True)
+    # And the subscriber must hear something even if the button is refused.
+    co = js.split('verb === "/checkout"', 1)[1].split("\n  }\n", 1)[0]
+    expect("/checkout falls back to a plain link rather than silence",
+           ("sent.ok === false" in co, "notifyOwner" in co), (True, True))
 
     worker_gated = set(re.findall(
         r'PAYWALL_ONLY = new Set\(\[([^\]]*)\]', js))
