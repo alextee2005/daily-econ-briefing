@@ -174,8 +174,10 @@ MSG = {
             "{link}"),
     # The answer to /checkout, which is a deliberate request for the link
     # rather than a consequence of something else happening.
-    "checkout": ("A year of the briefing is $4.99. Pay here and it starts with "
-                 "the next edition: {link}"),
+    # No {link}: the Worker sends this with a button carrying the Payment Link,
+    # so a URL in the body would be the same destination twice.
+    "checkout": ("A year of the briefing is $4.99, and it starts with the next "
+                 "edition. Tap below to subscribe."),
     "lapsed": ("Your subscription has ended, so the briefing has stopped. A "
                "year is $4.99 whenever you want it back: {link}"),
     "reminder": ("Your subscription renews in {n} day(s) at $4.99. It renews "
