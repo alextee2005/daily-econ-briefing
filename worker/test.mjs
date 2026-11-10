@@ -77,6 +77,14 @@ function harness({ approved = [], pending = [] } = {}) {
   };
 }
 
+// Every Telegram call lands in `sent`, menus included. Assertions about what
+// somebody was TOLD must therefore filter, not index: publishMenu() now runs
+// before the reply on /start, which silently turned sent[0].body.text into
+// undefined and broke three tests that were really still passing. Indexing
+// into a mixed list was the fragile part, so these two name what they mean.
+const messages = () => sent.filter((s) => s.method === "sendMessage");
+const texts = () => messages().map((s) => s.body.text);
+
 let uid = 5000;
 const nextUid = () => ++uid;
 
@@ -190,8 +198,8 @@ const queued = async (env) => {
   const env = harness({ approved: [FRIEND] });
   await hook(env, msg(FRIEND, "/start"));
   expect("an existing subscriber is told so, and not re-queued",
-    [sent[0].body.text, (await queued(env)).length],
-    ["You are already subscribed. Send /stop to unsubscribe.", 0]);
+    [texts(), (await queued(env)).length],
+    [["You are already subscribed. Send /stop to unsubscribe."], 0]);
 }
 
 // --- the owner's own /stop and text commands ----------------------------------
@@ -308,8 +316,8 @@ const queued = async (env) => {
                                        return realFetch(u, i); };
   await hook(env, msg(FRIEND, "/start"));
   expect("an approved subscriber is recognised from KV, without touching the repo",
-    [sent[0].body.text, fetchedGit],
-    ["You are already subscribed. Send /stop to unsubscribe.", false]);
+    [texts(), fetchedGit],
+    [["You are already subscribed. Send /stop to unsubscribe."], false]);
 }
 {
   // Garbage must be refused. The caller is a shell script whose upstream steps
@@ -518,6 +526,12 @@ const checkout = (chat, id = "evt_1") => ({
 {
   const env = harness();
   env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  // A payment implies the paywall is on — that is how they reached Stripe at
+  // all — and publishMenu() hides /manage while PAY_URL is unset, since
+  // /manage returns without replying until then. Without this the paid menu
+  // comes out as just /stop, which is correct for that configuration but not
+  // the one a real payment arrives in.
+  env.PAY_URL = "https://buy.stripe.com/test_x";
   const r = await stripeHook(env, checkout(FRIEND));
   expect("a correctly signed checkout is accepted", r.status, 200);
   const q = await queued(env);
@@ -526,7 +540,13 @@ const checkout = (chat, id = "evt_1") => ({
   expect("carrying the Stripe ids for later reconciliation",
     [q[0].stripe_customer_id, q[0].stripe_subscription_id], ["cus_1", "sub_1"]);
   expect("and the payer is told immediately, not at the next drain",
-    sent.map((s) => [s.method, s.body.chat_id]), [["sendMessage", FRIEND]]);
+    messages().map((s) => s.body.chat_id), [FRIEND]);
+  // The completed checkout is also what makes /manage real, so the paid menu
+  // goes out in the same request rather than waiting for the drain.
+  expect("and their menu becomes the paid one in the same request",
+    sent.filter((s) => s.method === "setMyCommands")
+        .map((s) => (s.body.commands || []).map((c) => c.command)),
+    [["manage", "stop"]]);
 }
 
 // --- forgeries -------------------------------------------------------------
