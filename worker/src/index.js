@@ -102,7 +102,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-10b";
+const VERSION = "2026-11-10c";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -302,8 +302,30 @@ async function tg(env, method, body) {
   return r.json().catch(() => ({ ok: false, description: "unparseable" }));
 }
 
-const say = (env, chat_id, text, extra = {}) =>
-  tg(env, "sendMessage", { chat_id, text, ...extra });
+/**
+ * Send a message, and say so in the log if Telegram refuses it.
+ *
+ * tg() returns Telegram's reply and nothing used to look at it, so a refused
+ * send produced no message to the subscriber AND no trace anywhere: the bot
+ * simply went quiet. That is the worst failure mode a bot has, because there
+ * is nothing to debug from — it cost a full round of "it is completely silent"
+ * before the cause (a Payment Link with a trailing newline, which makes an
+ * invalid button url) was found by reproducing it offline.
+ *
+ * Never throws. A send that cannot be made is not a reason to abandon the rest
+ * of the handler; it is a reason to write down what Telegram said.
+ */
+async function say(env, chat_id, text, extra = {}) {
+  const r = await tg(env, "sendMessage", { chat_id, text, ...extra });
+  if (r && r.ok === false) {
+    console.error(
+      `sendMessage refused for chat ...${String(chat_id).slice(-3)}:`,
+      r.description || "(no description)",
+      extra.reply_markup ? "(the message carried a keyboard)" : "",
+    );
+  }
+  return r;
+}
 
 /**
  * Append to the queue, keyed so that a lexical sort is true chronological order.
@@ -663,9 +685,24 @@ async function paidRecently(env, chatId) {
   }
 }
 
+/**
+ * A URL from configuration, or "" if it is not usable as one.
+ *
+ * Variables get pasted, and a paste brings a trailing newline or space with it
+ * often enough to matter. In a message body that is invisible; in a button url
+ * Telegram rejects the whole send with BUTTON_URL_INVALID. So trim, and treat
+ * anything still carrying whitespace — or not http(s) — as absent rather than
+ * passing it on to be refused.
+ */
+function cleanUrl(value) {
+  const v = String(value || "").trim();
+  if (!v || /\s/.test(v)) return "";
+  return /^https?:\/\//i.test(v) ? v : "";
+}
+
 /** The Payment Link with this chat attached, so the webhook can match it up. */
 function payLink(env, chatId) {
-  const base = String(env.PAY_URL || "");
+  const base = cleanUrl(env.PAY_URL);
   if (!base) return "";
   return base + (base.includes("?") ? "&" : "?") +
     "client_reference_id=" + encodeURIComponent(String(chatId));
@@ -844,8 +881,24 @@ async function onMessage(env, msg, seq) {
     if ((await hasBilling(env, id)) || (await paidRecently(env, id))) {
       return void say(env, id, MSG["already-subscribed"]);
     }
-    return void say(env, id, MSG["checkout"],
-                    checkoutKeyboard(payLink(env, id)));
+    const link = payLink(env, id);
+    if (!link) {
+      // PAY_URL is set but unusable — see cleanUrl(). Telling the owner is the
+      // only way this gets fixed; the subscriber must not just hear nothing.
+      console.error("PAY_URL is set but is not a usable url; check it for " +
+                    "whitespace or a missing https:// prefix");
+      await notifyOwner(env,
+        "Somebody asked to subscribe but PAY_URL is not a usable URL — check " +
+        "it for a trailing space or newline. They were told to try later.");
+      return void say(env, id, MSG["portal-unavailable"]);
+    }
+    const sent = await say(env, id, MSG["checkout"], checkoutKeyboard(link));
+    if (sent && sent.ok === false) {
+      // The button was refused. A plain link is worse but it is not nothing,
+      // and it keeps the chat moving while the cause is dealt with.
+      await say(env, id, `${MSG["checkout"]}\n\n${link}`);
+    }
+    return;
   }
 
   if (verb === "/manage" || verb === "/billing") {
@@ -976,7 +1029,11 @@ export default {
 
       // A value pasted into a dashboard field very easily carries a trailing
       // newline or space, which is equally invisible and equally fatal.
-      const untrimmed = ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET", "DRAIN_SECRET"]
+      // PAY_URL and the portal URLs are in here because a pasted newline on
+      // one of them is invisible everywhere else and breaks a button send.
+      const untrimmed = ["BOT_TOKEN", "OWNER_CHAT_ID", "WEBHOOK_SECRET",
+                         "DRAIN_SECRET", "PAY_URL", "PORTAL_URL",
+                         "PORTAL_RETURN_URL", "LIST_URL"]
         .filter((n) => typeof env[n] === "string" && env[n] !== env[n].trim());
 
       let queued = null;

@@ -465,12 +465,26 @@ payment back to a chat, so a change that puts the link back in the body would
 look fine to the subscriber and quietly break the webhook's matching. A test
 pins it.
 
-**If a command answers with silence, check `/health` first.** An unrecognised
-command falls off the end of the Worker's dispatch chain with no reply, so a
-command the deployed Worker has never heard of is indistinguishable from a
-broken one. `version` in `/health` says which code is actually running, and
-that one field settles it faster than any amount of reasoning about the
-handler.
+**If a command answers with silence**, there are two causes and `/health`
+distinguishes them.
+
+`version` says which code is running. An unrecognised command falls off the end
+of the Worker's dispatch chain with no reply, so a command the deployed Worker
+has never heard of looks exactly like a broken one.
+
+`untrimmed` is the other. A variable pasted with a trailing newline is
+invisible everywhere — in the dashboard, in a message body — right up until it
+is used as a button's URL, where Telegram rejects the entire send with
+`BUTTON_URL_INVALID`. `/health` lists any URL variable carrying whitespace, and
+`ok` is false while one does.
+
+That combination produced a genuinely silent `/checkout`: an invalid button
+URL, a refused send, and a `say()` that discarded Telegram's refusal, so there
+was no reply *and* no log line. `say()` now logs every refusal, `cleanUrl()`
+trims configured URLs and treats a non-`http(s)` one as absent, and
+`/checkout` falls back to a plain link and tells the owner rather than going
+quiet. The Worker's **Logs** in the Cloudflare dashboard are where a refusal
+shows up now.
 
 **Who sets which.** The Worker sets a chat's own menu at the moment that chat
 changes — on `/start`, on a redeemed code, when Stripe confirms a payment, and
