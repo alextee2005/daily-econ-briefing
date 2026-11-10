@@ -458,6 +458,20 @@ default one for that chat alone.
 So `/manage` is never offered before there is a card to manage, and
 `/checkout` disappears once it would charge someone twice.
 
+`/checkout` answers with a **button**, not a link in the message body — one tap
+opens Stripe. The Payment Link therefore travels in the button, and
+`client_reference_id` travels with it; that parameter is the only thing tying a
+payment back to a chat, so a change that puts the link back in the body would
+look fine to the subscriber and quietly break the webhook's matching. A test
+pins it.
+
+**If a command answers with silence, check `/health` first.** An unrecognised
+command falls off the end of the Worker's dispatch chain with no reply, so a
+command the deployed Worker has never heard of is indistinguishable from a
+broken one. `version` in `/health` says which code is actually running, and
+that one field settles it faster than any amount of reasoning about the
+handler.
+
 **Who sets which.** The Worker sets a chat's own menu at the moment that chat
 changes — on `/start`, on a redeemed code, when Stripe confirms a payment, and
 on `/stop`. It has to be the Worker: it is the only part that hears from

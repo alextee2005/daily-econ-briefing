@@ -67,8 +67,8 @@ const MSG = {
     "Your free editions are used up. A year of the briefing is " +
     "$4.99: {link}",
   checkout:
-    "A year of the briefing is $4.99. Pay here and it starts with " +
-    "the next edition: {link}",
+    "A year of the briefing is $4.99, and it starts with the next " +
+    "edition. Tap below to subscribe.",
   lapsed:
     "Your subscription has ended, so the briefing has stopped. A " +
     "year is $4.99 whenever you want it back: {link}",
@@ -102,7 +102,7 @@ const STOP = new Set(["/stop", "/unsubscribe"]);
 // The Worker runs from code pasted into the dashboard, not from this repository,
 // so "did my paste actually deploy?" is otherwise unanswerable — and a stale
 // deploy looks exactly like a configuration fault.
-const VERSION = "2026-11-10a";
+const VERSION = "2026-11-10b";
 
 // The subscriber list lives here, in KV, not in the repository. Chat IDs are
 // personal data and the repository is public; KV is private and already present
@@ -388,6 +388,23 @@ const decisionKeyboard = (chat_id) => ({
       { text: "✅ Approve", callback_data: `a:${chat_id}` },
       { text: "🚫 Deny", callback_data: `d:${chat_id}` },
     ]],
+  },
+});
+
+/**
+ * One button that opens the checkout page.
+ *
+ * A bare URL in the message body is a link the subscriber has to notice, read
+ * and decide to tap; a button is the thing they tap. Telegram has no notion of
+ * redirecting a chat, so this is as direct as a bot gets.
+ *
+ * The url carries client_reference_id, exactly as the text link did — that is
+ * what lets the Stripe webhook match the payment back to a chat, so it must
+ * survive being moved into the button.
+ */
+const checkoutKeyboard = (url) => ({
+  reply_markup: {
+    inline_keyboard: [[{ text: "Subscribe \u2014 $4.99 / year", url }]],
   },
 });
 
@@ -827,7 +844,8 @@ async function onMessage(env, msg, seq) {
     if ((await hasBilling(env, id)) || (await paidRecently(env, id))) {
       return void say(env, id, MSG["already-subscribed"]);
     }
-    return void say(env, id, fill("checkout", { link: payLink(env, id) }));
+    return void say(env, id, MSG["checkout"],
+                    checkoutKeyboard(payLink(env, id)));
   }
 
   if (verb === "/manage" || verb === "/billing") {

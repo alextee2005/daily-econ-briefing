@@ -652,6 +652,23 @@ if WORKER.is_file():
     expect("and it describes every command it can publish",
            sorted(needed - set(worker_text)), [])
 
+    # /checkout answers with a button rather than a URL in the body, so the
+    # Payment Link has to travel in the button — and client_reference_id with
+    # it, since that is the only thing tying a Stripe payment back to a chat.
+    # A regression to a bare link would still "work" for the subscriber and
+    # silently break the webhook's matching, which is why this is pinned.
+    expect("the checkout message carries no link of its own",
+           ("{link}" in MSG["checkout"], "http" in MSG["checkout"]),
+           (False, False))
+    branch = js.split('verb === "/checkout"', 1)[1].split("\n  }", 1)[0]
+    expect("/checkout sends the keyboard, not a filled-in link",
+           ("checkoutKeyboard(payLink(" in branch.replace("\n", " ").replace("  ", ""),
+            'fill("checkout"' in branch),
+           (True, False))
+    kb = js.split("const checkoutKeyboard", 1)[1].split("});", 1)[0]
+    expect("and that keyboard is a url button, so one tap opens Stripe",
+           ("url" in kb, "callback_data" in kb), (True, False))
+
     worker_gated = set(re.findall(
         r'PAYWALL_ONLY = new Set\(\[([^\]]*)\]', js))
     expect("the Worker hides the same commands until PAY_URL is set",
