@@ -83,28 +83,12 @@ jobs:
         run: pip install --quiet -r requirements.txt
 
       - name: Self-test the schedule and validation logic
-        run: |
-          python3 scripts/test_gate.py
-          python3 scripts/test_verify.py
-          python3 scripts/test_run_report.py
-          # Delivery runs in deliver.yml, but its tests run here: a broken
-          # subscriber list would send the briefing to the wrong people, and
-          # this is the job that runs every morning. Failing here stops a bad
-          # edition being made at all, rather than stopping a good one being
-          # delivered.
-          python3 scripts/test_subscribers.py
-          # Which edition gets sent, and pulling one back when the wrong one
-          # went out. Both are delivery-side, and both are here for the same
-          # reason as the line above: this job runs every morning.
-          python3 scripts/test_pick_edition.py
-          python3 scripts/test_recall_message.py
-          # Who may receive an edition. Wrongly denying someone who paid is
-          # invisible until they complain, so it is checked every morning.
-          python3 scripts/test_entitlement.py
-          # The Worker answers subscribers in real time and carries its own copy
-          # of the wording; test_subscribers.py compares the two so they cannot
-          # drift. Node is preinstalled on the runner.
-          node worker/test.mjs
+        # One list, in scripts/test_all.sh, so that running the tests locally
+        # and running them here cannot diverge. They had: this step listed the
+        # Worker's own suite as its last command, which made it easy to run the
+        # Python ones locally, see them pass, and break the morning briefing on
+        # a suite that had never been run.
+        run: bash scripts/test_all.sh
 
       - name: Decide whether to run
         id: gate
